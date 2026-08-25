@@ -1,16 +1,20 @@
-FROM rust:1.88-slim-bookworm AS runtime-build
+FROM debian:bookworm-slim AS build
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && apt-get install -y --no-install-recommends build-essential nasm pkg-config libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY runtime/Cargo.toml runtime/Cargo.lock ./
-COPY runtime/src ./src
-RUN cargo build --release --locked
+COPY Makefile ./
+COPY src ./src
+COPY adapter ./adapter
+RUN make all
 
 FROM debian:bookworm-slim
-RUN useradd --system --uid 10001 --create-home app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libcurl4 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home app
 WORKDIR /app
-COPY --from=runtime-build /app/target/release/val0x04 /usr/local/bin/val0x04
+COPY --from=build /app/build/val0x04-asm /usr/local/bin/val0x04-asm
 USER app
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/val0x04"]
+ENTRYPOINT ["/usr/local/bin/val0x04-asm"]

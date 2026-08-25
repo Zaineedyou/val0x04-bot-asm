@@ -1,9 +1,11 @@
 ; Val0x04/ASM — syscall-only x86-64 Linux prototype.
-; No libc, no Rust runtime, and no networking/JSON/WebSocket libraries are linked.
-; Build: nasm -f elf64 src/main.asm -o build/main.o && ld -static -o build/val0x04-asm build/main.o
+; No Rust runtime or networking/JSON/WebSocket libraries are linked.
+; The small C driver only passes envp and exposes a TLS-verified libcurl transport ABI.
 
 BITS 64
 DEFAULT REL
+
+extern secure_https_post_json
 
 %define SYS_READ            0
 %define SYS_WRITE           1
@@ -23,14 +25,12 @@ DEFAULT REL
 %define REQUEST_CAPACITY    16384
 
 section .text
-global _start
+global asm_service_start
 
-_start:
-    ; Process entry stack: argc, argv[], NULL, envp[].
-    ; Locate envp without libc and retain it in r15 for the parser.
-    mov r15, rsp
-    mov rax, [r15]
-    lea r15, [r15 + rax * 8 + 16]
+; rdi = environment-pointer array supplied by the C process driver.
+asm_service_start:
+    ; Keep envp in r15 for the existing syscall-only configuration parser.
+    mov r15, rdi
     call load_environment_from_envp
     lea rdi, [runtime_entropy]
     mov esi, 32
@@ -118,9 +118,26 @@ load_environment_from_envp:
     mov ecx, env_discord_len
     call has_prefix
     test al, al
-    jz .advance
+    jz .discord_channel
     lea rax, [rbx + env_discord_len]
     mov [discord_token_ptr], rax
+    mov rdi, rax
+    call cstring_length
+    mov [discord_token_len], eax
+    jmp .advance
+
+.discord_channel:
+    mov rdi, rbx
+    lea rsi, [env_discord_channel]
+    mov ecx, env_discord_channel_len
+    call has_prefix
+    test al, al
+    jz .advance
+    lea rax, [rbx + env_discord_channel_len]
+    mov [discord_channel_ptr], rax
+    mov rdi, rax
+    call cstring_length
+    mov [discord_channel_len], eax
 
 .advance:
     add r15, 8
@@ -273,8 +290,15 @@ handle_http_request:
     call panel_authorized
     test al, al
     jz .unauthorized
-    lea rsi, [response_discord_pending]
-    mov edx, response_discord_pending_len
+    call send_panel_message_to_discord
+    test eax, eax
+    jnz .discord_failure
+    lea rsi, [response_discord_sent]
+    mov edx, response_discord_sent_len
+    jmp .send
+.discord_failure:
+    lea rsi, [response_discord_failure]
+    mov edx, response_discord_failure_len
     jmp .send
 .unauthorized:
     lea rsi, [response_unauthorized]
@@ -300,6 +324,118 @@ handle_http_request:
     mov edi, dword [client_fd]
     call write_all
 .done:
+    ret
+
+; Send a raw panel request body as a JSON `content` value through the secure
+; transport ABI. The small parser rejects control characters, quotes and
+; backslashes rather than attempting unsafe escaping in a fixed-size buffer.
+; EAX = 0 only when Discord returns an HTTP 2xx status.
+send_panel_message_to_discord:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    cmp dword [discord_token_len], 0
+    je .bad
+    cmp dword [discord_channel_len], 0
+    je .bad
+
+    lea rdi, [request_buffer]
+    lea rsi, [header_terminator]
+    mov ecx, header_terminator_len
+    mov rdx, [request_length]
+    call find_bytes
+    test rax, rax
+    jz .bad
+    add rax, header_terminator_len
+    mov r12, rax                      ; panel message source
+    lea rdx, [request_buffer]
+    add rdx, [request_length]
+    sub rdx, r12
+    mov r13, rdx                      ; panel message length
+    test r13, r13
+    jz .bad
+    cmp r13, 2000
+    ja .bad
+
+    ; JSON content: {"content":"<raw message>"}.
+    lea rdi, [discord_json]
+    lea rsi, [discord_json_prefix]
+    mov edx, discord_json_prefix_len
+    call memory_copy
+    lea r14, [discord_json + discord_json_prefix_len]
+    xor rbx, rbx
+.copy_message:
+    cmp rbx, r13
+    jae .message_done
+    mov al, [r12 + rbx]
+    cmp al, 0x20
+    jb .bad
+    cmp al, '"'
+    je .bad
+    cmp al, 0x5c
+    je .bad
+    mov [r14 + rbx], al
+    inc rbx
+    jmp .copy_message
+.message_done:
+    lea rdi, [r14 + r13]
+    lea rsi, [discord_json_suffix]
+    mov edx, discord_json_suffix_len
+    call memory_copy
+    mov r15, r13
+    add r15, discord_json_prefix_len + discord_json_suffix_len
+
+    ; Authorization: Bot <DISCORD_TOKEN>.
+    lea rdi, [discord_authorization]
+    lea rsi, [discord_authorization_prefix]
+    mov edx, discord_authorization_prefix_len
+    call memory_copy
+    lea rdi, [discord_authorization + discord_authorization_prefix_len]
+    mov rsi, [discord_token_ptr]
+    mov edx, [discord_token_len]
+    call memory_copy
+    mov byte [discord_authorization + discord_authorization_prefix_len + rdx], 0
+
+    ; https://discord.com/api/v10/channels/<channel>/messages
+    lea rdi, [discord_url]
+    lea rsi, [discord_url_prefix]
+    mov edx, discord_url_prefix_len
+    call memory_copy
+    lea rdi, [discord_url + discord_url_prefix_len]
+    mov rsi, [discord_channel_ptr]
+    mov edx, [discord_channel_len]
+    call memory_copy
+    lea rdi, [discord_url + discord_url_prefix_len + rdx]
+    lea rsi, [discord_url_suffix]
+    mov edx, discord_url_suffix_len
+    call memory_copy
+    mov byte [rdi + rdx], 0
+
+    lea rdi, [discord_url]
+    lea rsi, [discord_authorization]
+    lea rdx, [discord_json]
+    mov rcx, r15
+    lea r8, [discord_http_status]
+    call secure_https_post_json
+    test rax, rax
+    jnz .bad
+    mov rax, [discord_http_status]
+    cmp rax, 200
+    jb .bad
+    cmp rax, 300
+    jae .bad
+    xor eax, eax
+    jmp .out
+.bad:
+    mov eax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     ret
 
 ; Validate `Authorization: Bearer <PANEL_ACCESS_TOKEN>` with a CRLF boundary.
@@ -924,12 +1060,59 @@ websocket_receive_frame:
 .text:
     cmp ebx, 1
     jne .ok
-    inc qword [bridge_events_received]    ; Discord transport is the next phase.
+    call forward_fabric_chat_to_discord
+    inc qword [bridge_events_received]
 .ok:
     xor eax, eax
     ret
 .bad:
     mov eax, -1
+    ret
+
+; Extract a narrow Fabric chat payload: {"message":"..."}. This app logic
+; belongs to NASM; the C boundary only transmits the final HTTPS request.
+forward_fabric_chat_to_discord:
+    push r12
+    push r13
+    lea rdi, [ws_payload]
+    lea rsi, [fabric_message_prefix]
+    mov ecx, fabric_message_prefix_len
+    mov edx, [ws_payload_length]
+    call find_bytes
+    test rax, rax
+    jz .out
+    add rax, fabric_message_prefix_len
+    mov r12, rax
+    xor r13, r13
+.scan:
+    cmp r13, 2000
+    jae .out
+    mov al, [r12 + r13]
+    test al, al
+    jz .out
+    cmp al, '"'
+    je .message_found
+    inc r13
+    jmp .scan
+.message_found:
+    test r13, r13
+    jz .out
+    ; Reuse the NASM REST builder with a synthetic header/body boundary.
+    lea rdi, [request_buffer]
+    lea rsi, [header_terminator]
+    mov edx, header_terminator_len
+    call memory_copy
+    lea rdi, [request_buffer + header_terminator_len]
+    mov rsi, r12
+    mov rdx, r13
+    call memory_copy
+    mov rax, r13
+    add rax, header_terminator_len
+    mov [request_length], rax
+    call send_panel_message_to_discord
+.out:
+    pop r13
+    pop r12
     ret
 
 ; rdi=buffer, esi=count; reads all bytes from the active bridge socket.
@@ -1023,6 +1206,8 @@ env_panel:             db 'PANEL_ACCESS_TOKEN='
 env_panel_len          equ $ - env_panel
 env_discord:           db 'DISCORD_TOKEN='
 env_discord_len        equ $ - env_discord
+env_discord_channel:   db 'DISCORD_CHANNEL_ID='
+env_discord_channel_len equ $ - env_discord_channel
 
 method_health:         db 'GET /health '
 method_health_len      equ $ - method_health
@@ -1032,15 +1217,29 @@ method_chat:           db 'POST /api/chat '
 method_chat_len        equ $ - method_chat
 method_root:           db 'GET / '
 method_root_len        equ $ - method_root
+fabric_message_prefix: db '"message":"'
+fabric_message_prefix_len equ $ - fabric_message_prefix
 authorization_prefix:  db 'Authorization: Bearer '
 authorization_prefix_len equ $ - authorization_prefix
+header_terminator:      db 13,10,13,10
+header_terminator_len   equ $ - header_terminator
+discord_url_prefix:     db 'https://discord.com/api/v10/channels/'
+discord_url_prefix_len  equ $ - discord_url_prefix
+discord_url_suffix:     db '/messages'
+discord_url_suffix_len  equ $ - discord_url_suffix
+discord_authorization_prefix: db 'Authorization: Bot '
+discord_authorization_prefix_len equ $ - discord_authorization_prefix
+discord_json_prefix:    db '{"content":"'
+discord_json_prefix_len equ $ - discord_json_prefix
+discord_json_suffix:    db '"}'
+discord_json_suffix_len equ $ - discord_json_suffix
 
 response_health:
     db 'HTTP/1.1 200 OK',13,10
     db 'Content-Type: application/json; charset=utf-8',13,10
     db 'Cache-Control: no-store',13,10
     db 'Connection: close',13,10,13,10
-    db '{"status":"ok","runtime":"pure-assembly"}',10
+    db '{"status":"ok","runtime":"assembly-dominant"}',10
 response_health_len equ $ - response_health
 
 response_panel:
@@ -1058,12 +1257,19 @@ response_unauthorized:
     db '{"error":"unauthorized"}',10
 response_unauthorized_len equ $ - response_unauthorized
 
-response_discord_pending:
-    db 'HTTP/1.1 501 Not Implemented',13,10
+response_discord_sent:
+    db 'HTTP/1.1 200 OK',13,10
     db 'Content-Type: application/json',13,10
     db 'Connection: close',13,10,13,10
-    db '{"error":"pure Discord TLS/Gateway transport is not installed"}',10
-response_discord_pending_len equ $ - response_discord_pending
+    db '{"status":"sent"}',10
+response_discord_sent_len equ $ - response_discord_sent
+
+response_discord_failure:
+    db 'HTTP/1.1 502 Bad Gateway',13,10
+    db 'Content-Type: application/json',13,10
+    db 'Connection: close',13,10,13,10
+    db '{"error":"Discord transport rejected the request"}',10
+response_discord_failure_len equ $ - response_discord_failure
 
 response_upgrade_required:
     db 'HTTP/1.1 426 Upgrade Required',13,10
@@ -1098,6 +1304,10 @@ bridge_token_len:       dd 0
 panel_token_ptr:        dq 0
 panel_token_len:        dd 0
 discord_token_ptr:      dq 0
+discord_token_len:      dd 0
+discord_channel_ptr:    dq 0
+discord_channel_len:    dd 0
+discord_http_status:    dq 0
 bridge_events_received: dq 0
 ws_payload_length:      dd 0
 ws_idle_seconds:        dd 0
@@ -1129,3 +1339,6 @@ ws_extended_length:     resb 2
 ws_mask:                resb 4
 ws_payload:             resb 4096
 ws_out_header:          resb 2
+discord_url:            resb 256
+discord_authorization:  resb 512
+discord_json:           resb 4096
