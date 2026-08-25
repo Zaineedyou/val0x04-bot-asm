@@ -113,6 +113,114 @@ sha256_digest:
     pop rbx
     ret
 
+; HMAC-SHA256 one-shot primitive.
+; rdi=key, rsi=key length, rdx=message, rcx=message length, r8=32-byte output.
+; EAX=0 on success, -1 when the bounded working buffer is exceeded.
+global hmac_sha256
+hmac_sha256:
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov r15, rcx
+    mov rbp, r8
+    cmp r15, 1024
+    ja .error
+
+    ; Normalize key into a zero-padded 64-byte block.
+    lea rdi, [hmac_key]
+    mov ecx, 64
+    xor eax, eax
+.zero_key:
+    mov [rdi], al
+    inc rdi
+    dec ecx
+    jnz .zero_key
+    cmp r13, 64
+    jbe .copy_key
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [hmac_key]
+    call sha256_digest
+    lea r12, [hmac_key]
+    mov r13, 32
+.copy_key:
+    xor ecx, ecx
+.copy_key_loop:
+    cmp rcx, r13
+    jae .inner_pad
+    mov al, [r12 + rcx]
+    mov [hmac_key + rcx], al
+    inc rcx
+    jmp .copy_key_loop
+
+.inner_pad:
+    xor ecx, ecx
+.inner_pad_loop:
+    cmp ecx, 64
+    jae .copy_message
+    mov al, [hmac_key + rcx]
+    xor al, 0x36
+    mov [hmac_work + rcx], al
+    inc ecx
+    jmp .inner_pad_loop
+.copy_message:
+    xor ecx, ecx
+.copy_message_loop:
+    cmp rcx, r15
+    jae .hash_inner
+    mov al, [r14 + rcx]
+    mov [hmac_work + 64 + rcx], al
+    inc rcx
+    jmp .copy_message_loop
+.hash_inner:
+    lea rdi, [hmac_work]
+    mov rsi, r15
+    add rsi, 64
+    lea rdx, [hmac_inner_digest]
+    call sha256_digest
+
+    xor ecx, ecx
+.outer_pad_loop:
+    cmp ecx, 64
+    jae .copy_inner_digest
+    mov al, [hmac_key + rcx]
+    xor al, 0x5c
+    mov [hmac_work + rcx], al
+    inc ecx
+    jmp .outer_pad_loop
+.copy_inner_digest:
+    xor ecx, ecx
+.copy_inner_loop:
+    cmp ecx, 32
+    jae .hash_outer
+    mov al, [hmac_inner_digest + rcx]
+    mov [hmac_work + 64 + rcx], al
+    inc ecx
+    jmp .copy_inner_loop
+.hash_outer:
+    lea rdi, [hmac_work]
+    mov esi, 96
+    mov rdx, rbp
+    call sha256_digest
+    xor eax, eax
+    jmp .out
+.error:
+    mov eax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+
 ; rdi points to one complete 64-byte block. Updates sha256_h0..sha256_h7.
 sha256_compress:
     push rbx
@@ -275,3 +383,6 @@ sha256_h4:    resd 1
 sha256_h5:    resd 1
 sha256_h6:    resd 1
 sha256_h7:    resd 1
+hmac_key:     resb 64
+hmac_work:    resb 1088
+hmac_inner_digest: resb 32

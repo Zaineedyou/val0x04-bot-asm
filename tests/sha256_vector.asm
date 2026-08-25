@@ -2,6 +2,7 @@ BITS 64
 DEFAULT REL
 
 extern sha256_digest
+extern hmac_sha256
 global _start
 
 %define SYS_EXIT 60
@@ -29,6 +30,20 @@ _start:
     test eax, eax
     jnz .fail
 
+    lea rdi, [hmac_key]
+    mov esi, hmac_key_len
+    lea rdx, [hmac_message]
+    mov ecx, hmac_message_len
+    lea r8, [hmac_digest]
+    call hmac_sha256
+    test eax, eax
+    jnz .fail
+    lea rdi, [hmac_digest]
+    lea rsi, [hmac_expected]
+    call check_bytes_32
+    test eax, eax
+    jnz .fail
+
     mov eax, SYS_EXIT
     xor edi, edi
     syscall
@@ -38,6 +53,24 @@ _start:
     syscall
 
 ; rdi=message, esi=length, rdx=expected digest. EAX=0 when equal.
+; rdi=actual digest, rsi=expected digest. EAX=0 when equal.
+check_bytes_32:
+    xor ecx, ecx
+.loop:
+    cmp ecx, 32
+    jae .pass
+    mov al, [rdi + rcx]
+    cmp al, [rsi + rcx]
+    jne .mismatch
+    inc ecx
+    jmp .loop
+.pass:
+    xor eax, eax
+    ret
+.mismatch:
+    mov eax, 1
+    ret
+
 check_digest:
     push r12
     mov r12, rdx
@@ -85,5 +118,16 @@ boundary_digest:
     db 0xa3,0x3c,0xe4,0x59,0x64,0xff,0x21,0x67
     db 0xf6,0xec,0xed,0xd4,0x19,0xdb,0x06,0xc1
 
+hmac_key: times 20 db 0x0b
+hmac_key_len equ $ - hmac_key
+hmac_message: db 'Hi There'
+hmac_message_len equ $ - hmac_message
+hmac_expected:
+    db 0xb0,0x34,0x4c,0x61,0xd8,0xdb,0x38,0x53
+    db 0x5c,0xa8,0xaf,0xce,0xaf,0x0b,0xf1,0x2b
+    db 0x88,0x1d,0xc2,0x00,0xc9,0x83,0x3d,0xa7
+    db 0x26,0xe9,0x37,0x6c,0x2e,0x32,0xcf,0xf7
+
 section .bss
 digest: resb 32
+hmac_digest: resb 32
