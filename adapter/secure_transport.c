@@ -50,6 +50,16 @@ const char *secure_transport_last_error(void) {
     return last_error[0] ? last_error : curl_easy_strerror(CURLE_OK);
 }
 
+int secure_gateway_socket(void) {
+    curl_socket_t socket_fd = CURL_SOCKET_BAD;
+    CURLcode code;
+
+    if (!gateway) return -ENOTCONN;
+    code = curl_easy_getinfo(gateway, CURLINFO_ACTIVESOCKET, &socket_fd);
+    if (code != CURLE_OK || socket_fd == CURL_SOCKET_BAD) return -ENOTCONN;
+    return (int)socket_fd;
+}
+
 void secure_gateway_close(void) {
     if (gateway) {
         curl_easy_cleanup(gateway);

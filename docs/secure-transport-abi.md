@@ -18,6 +18,7 @@ Semua fungsi berikut memakai System V AMD64 ABI dan mengembalikan `0` bila sukse
 ```c
 int secure_transport_init(void);
 int secure_gateway_connect(const char *wss_url);
+int secure_gateway_socket(void);
 long secure_gateway_send_text(const char *data, size_t len);
 long secure_gateway_recv_text(char *out, size_t cap, size_t *out_len);
 void secure_gateway_close(void);
