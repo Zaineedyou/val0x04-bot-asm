@@ -1,39 +1,37 @@
-# Checklist deploy Railway
+# Checklist deploy Railway — NASM dominan
 
 ## Sebelum deploy
 
 | Pemeriksaan | Nilai yang diharapkan |
 |---|---|
 | Repository | `Zaineedyou/val0x04-bot-asm`, branch `main` |
-| Build source | `Dockerfile` root membangun `runtime/` dengan Rust 1.88 |
-| Discord application | Bot sudah diundang ke server dan memiliki izin Read/Send Messages pada channel tujuan |
-| Discord intents | **Server Members Intent** dan **Message Content Intent** sudah aktif |
-| Token | `DISCORD_TOKEN`, `BRIDGE_WEBSOCKET_AUTH_TOKEN`, dan `PANEL_ACCESS_TOKEN` adalah nilai rahasia yang berbeda |
+| Runtime | NASM x86-64 + adapter C/libcurl kecil; tidak ada Rust runtime |
+| Dockerfile | Build stage memasang `nasm`, `build-essential`, dan `libcurl4-openssl-dev` |
+| Discord application | Bot sudah diundang ke server dan memiliki izin membaca/mengirim pada channel target |
+| Rahasia | Token Discord, bridge, dan panel berbeda serta tidak pernah dicommit |
 
 ## Railway Variables
 
-Tambahkan semua nilai berikut pada service Railway. Jangan set `PORT`; Railway menyediakannya sendiri.
-
-| Nama | Format / aturan |
+| Nama | Aturan |
 |---|---|
-| `DISCORD_TOKEN` | Token bot Discord saat ini |
-| `DISCORD_CHANNEL_ID` | Snowflake channel Discord target, hanya angka |
-| `BRIDGE_WEBSOCKET_AUTH_TOKEN` | Token acak panjang; salin nilai yang sama ke mod Fabric |
-| `PANEL_ACCESS_TOKEN` | Token acak panjang yang **berbeda** dari token bridge |
+| `DISCORD_TOKEN` | Token bot Discord saat ini. Hanya dirangkai menjadi header authorization oleh NASM dan dikirim melalui TLS libcurl. |
+| `DISCORD_CHANNEL_ID` | Snowflake channel Discord target, angka saja. |
+| `BRIDGE_WEBSOCKET_AUTH_TOKEN` | Token acak panjang; salin sama persis ke mod Fabric. |
+| `PANEL_ACCESS_TOKEN` | Token acak panjang yang berbeda dari token bridge. |
+| `PORT` | Dikelola Railway; jangan set manual. |
 
-## Verifikasi setelah deploy
+## Verifikasi pascadeploy
 
-1. Pastikan log service tidak menunjukkan kegagalan konfigurasi, koneksi Discord, atau binding port.
-2. Generate domain di Railway dan buka `https://<domain>/panel`. Masukkan `PANEL_ACCESS_TOKEN`, lalu kirim pesan uji; pesan harus muncul sebagai bot pada `DISCORD_CHANNEL_ID`.
-3. Pada mod Fabric, set `websocket-url=wss://<domain>` dan gunakan token bridge yang sama.
-4. Mulai atau restart server Minecraft. Log Railway harus mengindikasikan bridge Fabric tersambung.
-5. Kirim chat Minecraft dan pastikan masuk ke Discord. Kirim chat pada channel Discord yang dikonfigurasi dan pastikan muncul di Minecraft.
-6. Putuskan mod Fabric sementara, lalu sambungkan kembali. Service harus tetap hidup dan menerima koneksi baru tanpa restart.
+1. Pastikan build log memuat `make all` dan tidak ada kesalahan dependency libcurl.
+2. Generate domain Railway, buka `/health`, dan pastikan respons menunjukkan `"runtime":"assembly-dominant"`.
+3. Buka `/panel`, gunakan `PANEL_ACCESS_TOKEN`, lalu kirim pesan biasa tanpa quote, backslash, atau karakter kontrol. Endpoint menolak karakter tersebut sampai JSON escaping NASM lengkap diaktifkan.
+4. Set mod Fabric ke `wss://<domain>` dan `BRIDGE_WEBSOCKET_AUTH_TOKEN`; tes handshake dan Ping/Pong.
+5. Set `DISCORD_TOKEN` serta `DISCORD_CHANNEL_ID`, lalu tes pesan panel ke Discord. Bila transport menolak sertifikat/host atau token, endpoint menampilkan `502` tanpa membocorkan rahasia.
 
-## Respons insiden
+## Keamanan
 
-Jika log memuat token atau token pernah masuk commit/screenshot, rotasi segera nilai itu. Untuk token Discord, lakukan rotasi di Discord Developer Portal lalu update Railway Variables dan redeploy. Untuk bridge atau panel token, buat nilai acak baru, update Railway, dan update konfigurasi mod Fabric bila token bridge berubah.
+Jangan menonaktifkan certificate verification. Adapter transport memaksa validasi CA dan hostname di libcurl. Jika token bocor, rotasi pada Discord Developer Portal atau Railway Variables lalu redeploy.
 
-## Batas verifikasi lokal
+## Batas checkpoint
 
-Source, test unit runtime, build release, dan rangkaian NASM telah diuji lokal. Koneksi Gateway Discord dan deploy container tidak dapat diuji tanpa token bot serta project Railway milik pengguna; checklist ini adalah langkah verifikasi terakhir yang harus dilakukan setelah secrets diset di Railway.
+Rilis ini sudah menjalankan HTTP, panel, WebSocket Fabric, liveness, dan jalur REST yang dibangun NASM. Gateway Discord dua arah sedang dipindahkan ke assembly di atas API WSS adapter; transport WSS sendiri sudah tersedia di adapter tanpa menambah runtime Rust.
