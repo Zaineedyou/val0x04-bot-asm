@@ -1,4 +1,7 @@
 FROM rust:1.88-slim-bookworm AS runtime-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY runtime/Cargo.toml runtime/Cargo.lock ./
 COPY runtime/src ./src
