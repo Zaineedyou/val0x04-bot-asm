@@ -1,11 +1,13 @@
-FROM alpine:3.20 AS build
-RUN apk add --no-cache nasm binutils make
-WORKDIR /src
-COPY Makefile ./
-COPY src ./src
-RUN make all
+FROM rust:1.88-slim-bookworm AS runtime-build
+WORKDIR /app
+COPY runtime/Cargo.toml runtime/Cargo.lock ./
+COPY runtime/src ./src
+RUN cargo build --release --locked
 
-FROM scratch
-COPY --from=build /src/build/val0x04-asm /val0x04-asm
+FROM debian:bookworm-slim
+RUN useradd --system --uid 10001 --create-home app
+WORKDIR /app
+COPY --from=runtime-build /app/target/release/val0x04 /usr/local/bin/val0x04
+USER app
 EXPOSE 8080
-ENTRYPOINT ["/val0x04-asm"]
+ENTRYPOINT ["/usr/local/bin/val0x04"]
