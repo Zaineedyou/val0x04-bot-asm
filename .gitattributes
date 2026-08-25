@@ -1,0 +1,5 @@
+# Runtime bridge is NASM-first. Rust is not part of the supported source tree.
+*.rs linguist-vendored
+adapter/*.c linguist-detectable=true
+src/*.asm linguist-detectable=true
+tests/*.asm linguist-detectable=true
