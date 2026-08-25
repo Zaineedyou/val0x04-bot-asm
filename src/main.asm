@@ -14,6 +14,7 @@ DEFAULT REL
 %define SYS_LISTEN          50
 %define SYS_SETSOCKOPT      54
 %define SYS_EXIT            60
+%define SYS_GETRANDOM       318
 
 %define AF_INET             2
 %define SOCK_STREAM         1
@@ -31,6 +32,11 @@ _start:
     mov rax, [r15]
     lea r15, [r15 + rax * 8 + 16]
     call load_environment_from_envp
+    lea rdi, [runtime_entropy]
+    mov esi, 32
+    call secure_random
+    cmp eax, 32
+    jne fatal_entropy
     call open_listener
 
 .accept_loop:
@@ -411,6 +417,43 @@ write_all:
     pop r12
     ret
 
+; rdi = destination, esi = requested bytes. EAX = bytes read or a negative errno.
+; This wrapper retries EINTR and refuses a zero-byte result.
+secure_random:
+    push r12
+    push r13
+    push r14
+    mov r12, rdi
+    mov r13d, esi
+    mov r14d, esi
+    xor edx, edx
+.loop:
+    test r13d, r13d
+    jz .done
+    mov eax, SYS_GETRANDOM
+    mov rdi, r12
+    mov esi, r13d
+    xor edx, edx
+    syscall
+    cmp rax, -4                         ; EINTR
+    je .loop
+    test rax, rax
+    jle .out
+    add r12, rax
+    sub r13d, eax
+    jmp .loop
+.done:
+    mov eax, r14d
+.out:
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+fatal_entropy:
+    lea rsi, [error_entropy]
+    mov edx, error_entropy_len
+    jmp fatal
 fatal_socket:
     lea rsi, [error_socket]
     mov edx, error_socket_len
@@ -1036,6 +1079,8 @@ response_not_found:
     db '{"error":"not found"}',10
 response_not_found_len equ $ - response_not_found
 
+error_entropy:         db 'val0x04-asm: getrandom() failed',10
+error_entropy_len      equ $ - error_entropy
 error_socket:          db 'val0x04-asm: socket() failed',10
 error_socket_len       equ $ - error_socket
 error_bind:            db 'val0x04-asm: bind() failed (check PORT)',10
@@ -1073,6 +1118,7 @@ listen_port_network:    dw 0x901f              ; default 8080, network order
 section .bss
 align 16
 request_buffer:         resb REQUEST_CAPACITY
+runtime_entropy:        resb 32
 sha_input:              resb 60
 sha_block:              resb 64
 sha_words:              resd 80
