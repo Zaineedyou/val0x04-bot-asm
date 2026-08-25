@@ -221,6 +221,96 @@ hmac_sha256:
     pop rbx
     ret
 
+; HKDF-Expand(SHA-256) primitive.
+; rdi=PRK, rsi=PRK length, rdx=info, rcx=info length, r8=output, r9=output length.
+; The implementation is bounded to TLS label-sized info and 255 blocks.
+; EAX=0 on success, -1 when an input violates bounded limits.
+global hkdf_expand_sha256
+hkdf_expand_sha256:
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov r15, rcx
+    mov rbp, r8
+    mov rbx, r9
+    test r13, r13
+    jz .error
+    cmp r15, 991                       ; 32-byte previous block + info + counter <= 1024
+    ja .error
+    cmp rbx, 8160                      ; RFC 5869 maximum: 255 * HashLen
+    ja .error
+    mov dword [hkdf_prev_len], 0
+    mov byte [hkdf_counter], 1
+.loop:
+    test rbx, rbx
+    jz .success
+    xor ecx, ecx
+.copy_prev:
+    cmp ecx, [hkdf_prev_len]
+    jae .copy_info
+    mov al, [hkdf_prev + rcx]
+    mov [hkdf_message + rcx], al
+    inc ecx
+    jmp .copy_prev
+.copy_info:
+    xor edx, edx
+.copy_info_loop:
+    cmp rdx, r15
+    jae .append_counter
+    mov al, [r14 + rdx]
+    mov [hkdf_message + rcx + rdx], al
+    inc rdx
+    jmp .copy_info_loop
+.append_counter:
+    add rcx, r15
+    mov al, [hkdf_counter]
+    mov [hkdf_message + rcx], al
+    inc rcx
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [hkdf_message]
+    ; rcx already has the HMAC message length.
+    lea r8, [hkdf_prev]
+    call hmac_sha256
+    test eax, eax
+    jnz .error
+    mov dword [hkdf_prev_len], 32
+
+    xor ecx, ecx
+.copy_output:
+    cmp ecx, 32
+    jae .next_block
+    test rbx, rbx
+    jz .success
+    mov al, [hkdf_prev + rcx]
+    mov [rbp], al
+    inc rbp
+    dec rbx
+    inc ecx
+    jmp .copy_output
+.next_block:
+    inc byte [hkdf_counter]
+    jnz .loop
+.error:
+    mov eax, -1
+    jmp .out
+.success:
+    xor eax, eax
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    ret
+
 ; rdi points to one complete 64-byte block. Updates sha256_h0..sha256_h7.
 sha256_compress:
     push rbx
@@ -386,3 +476,7 @@ sha256_h7:    resd 1
 hmac_key:     resb 64
 hmac_work:    resb 1088
 hmac_inner_digest: resb 32
+hkdf_prev:    resb 32
+hkdf_message: resb 1024
+hkdf_prev_len: resd 1
+hkdf_counter: resb 1

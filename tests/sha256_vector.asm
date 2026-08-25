@@ -3,6 +3,7 @@ DEFAULT REL
 
 extern sha256_digest
 extern hmac_sha256
+extern hkdf_expand_sha256
 global _start
 
 %define SYS_EXIT 60
@@ -40,7 +41,40 @@ _start:
     jnz .fail
     lea rdi, [hmac_digest]
     lea rsi, [hmac_expected]
-    call check_bytes_32
+    mov edx, 32
+    call check_bytes
+    test eax, eax
+    jnz .fail
+
+    ; RFC 5869 test case 1: Extract then Expand to 42 bytes.
+    lea rdi, [hkdf_salt]
+    mov esi, hkdf_salt_len
+    lea rdx, [hkdf_ikm]
+    mov ecx, hkdf_ikm_len
+    lea r8, [hkdf_prk]
+    call hmac_sha256
+    test eax, eax
+    jnz .fail
+    lea rdi, [hkdf_prk]
+    lea rsi, [hkdf_prk_expected]
+    mov edx, 32
+    call check_bytes
+    test eax, eax
+    jnz .fail
+
+    lea rdi, [hkdf_prk]
+    mov esi, 32
+    lea rdx, [hkdf_info]
+    mov ecx, hkdf_info_len
+    lea r8, [hkdf_okm]
+    mov r9d, 42
+    call hkdf_expand_sha256
+    test eax, eax
+    jnz .fail
+    lea rdi, [hkdf_okm]
+    lea rsi, [hkdf_okm_expected]
+    mov edx, 42
+    call check_bytes
     test eax, eax
     jnz .fail
 
@@ -53,11 +87,11 @@ _start:
     syscall
 
 ; rdi=message, esi=length, rdx=expected digest. EAX=0 when equal.
-; rdi=actual digest, rsi=expected digest. EAX=0 when equal.
-check_bytes_32:
+; rdi=actual bytes, rsi=expected bytes, edx=length. EAX=0 when equal.
+check_bytes:
     xor ecx, ecx
 .loop:
-    cmp ecx, 32
+    cmp ecx, edx
     jae .pass
     mov al, [rdi + rcx]
     cmp al, [rsi + rcx]
@@ -128,6 +162,27 @@ hmac_expected:
     db 0x88,0x1d,0xc2,0x00,0xc9,0x83,0x3d,0xa7
     db 0x26,0xe9,0x37,0x6c,0x2e,0x32,0xcf,0xf7
 
+hkdf_ikm: times 22 db 0x0b
+hkdf_ikm_len equ $ - hkdf_ikm
+hkdf_salt: db 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c
+hkdf_salt_len equ $ - hkdf_salt
+hkdf_info: db 0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9
+hkdf_info_len equ $ - hkdf_info
+hkdf_prk_expected:
+    db 0x07,0x77,0x09,0x36,0x2c,0x2e,0x32,0xdf
+    db 0x0d,0xdc,0x3f,0x0d,0xc4,0x7b,0xba,0x63
+    db 0x90,0xb6,0xc7,0x3b,0xb5,0x0f,0x9c,0x31
+    db 0x22,0xec,0x84,0x4a,0xd7,0xc2,0xb3,0xe5
+hkdf_okm_expected:
+    db 0x3c,0xb2,0x5f,0x25,0xfa,0xac,0xd5,0x7a
+    db 0x90,0x43,0x4f,0x64,0xd0,0x36,0x2f,0x2a
+    db 0x2d,0x2d,0x0a,0x90,0xcf,0x1a,0x5a,0x4c
+    db 0x5d,0xb0,0x2d,0x56,0xec,0xc4,0xc5,0xbf
+    db 0x34,0x00,0x72,0x08,0xd5,0xb8,0x87,0x18
+    db 0x58,0x65
+
 section .bss
 digest: resb 32
 hmac_digest: resb 32
+hkdf_prk: resb 32
+hkdf_okm: resb 42
