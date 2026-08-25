@@ -1,0 +1,89 @@
+BITS 64
+DEFAULT REL
+
+extern sha256_digest
+global _start
+
+%define SYS_EXIT 60
+
+section .text
+_start:
+    lea rdi, [empty_message]
+    xor esi, esi
+    lea rdx, [empty_digest]
+    call check_digest
+    test eax, eax
+    jnz .fail
+
+    lea rdi, [abc_message]
+    mov esi, abc_message_len
+    lea rdx, [abc_digest]
+    call check_digest
+    test eax, eax
+    jnz .fail
+
+    lea rdi, [boundary_message]
+    mov esi, boundary_message_len
+    lea rdx, [boundary_digest]
+    call check_digest
+    test eax, eax
+    jnz .fail
+
+    mov eax, SYS_EXIT
+    xor edi, edi
+    syscall
+.fail:
+    mov eax, SYS_EXIT
+    mov edi, 1
+    syscall
+
+; rdi=message, esi=length, rdx=expected digest. EAX=0 when equal.
+check_digest:
+    push r12
+    mov r12, rdx
+    lea rdx, [digest]
+    call sha256_digest
+    xor ecx, ecx
+.compare:
+    cmp ecx, 32
+    jae .pass
+    mov al, [digest + rcx]
+    cmp al, [r12 + rcx]
+    jne .mismatch
+    inc ecx
+    jmp .compare
+.pass:
+    xor eax, eax
+    jmp .out
+.mismatch:
+    mov eax, 1
+.out:
+    pop r12
+    ret
+
+section .rodata
+empty_message: db 0
+empty_digest:
+    db 0xe3,0xb0,0xc4,0x42,0x98,0xfc,0x1c,0x14
+    db 0x9a,0xfb,0xf4,0xc8,0x99,0x6f,0xb9,0x24
+    db 0x27,0xae,0x41,0xe4,0x64,0x9b,0x93,0x4c
+    db 0xa4,0x95,0x99,0x1b,0x78,0x52,0xb8,0x55
+
+abc_message: db 'abc'
+abc_message_len equ $ - abc_message
+abc_digest:
+    db 0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea
+    db 0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23
+    db 0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c
+    db 0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad
+
+boundary_message: db 'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq'
+boundary_message_len equ $ - boundary_message
+boundary_digest:
+    db 0x24,0x8d,0x6a,0x61,0xd2,0x06,0x38,0xb8
+    db 0xe5,0xc0,0x26,0x93,0x0c,0x3e,0x60,0x39
+    db 0xa3,0x3c,0xe4,0x59,0x64,0xff,0x21,0x67
+    db 0xf6,0xec,0xed,0xd4,0x19,0xdb,0x06,0xc1
+
+section .bss
+digest: resb 32
