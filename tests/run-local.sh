@@ -7,6 +7,7 @@ port="${PORT:-18080}"
 cd "$root"
 make clean
 make all
+make test-crypto
 file build/val0x04-asm | grep -F 'statically linked'
 ! readelf -d build/val0x04-asm | grep -Fq 'NEEDED'
 

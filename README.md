@@ -15,6 +15,8 @@ Ini adalah **milestone inbound bridge yang dapat dibangun dan dijalankan**. Ia b
 | Token panel | Siap | Header `Authorization: Bearer <PANEL_ACCESS_TOKEN>` dibandingkan secara tepat. |
 | `POST /api/chat` | Aman tetapi belum aktif | Mengembalikan `501`; tidak pernah mengirim token Discord. |
 | WebSocket `/` | Siap untuk fondasi | Memerlukan `X-Auth-Token`; handshake SHA-1/Base64, Ping/Pong, batas satu klien aktif, dan timeout liveness tersedia. |
+| Entropi TLS | Siap sebagai fondasi | Wrapper `getrandom(2)` syscall membaca 32 byte sebelum server mulai. |
+| SHA-256, HMAC-SHA256, HKDF | Siap sebagai fondasi | Semua assembly dan diuji dengan vektor SHA/HMAC/RFC 5869. |
 | Fabric event → Discord | Belum aktif | Menunggu TLS/REST aman. |
 | Discord Gateway → Fabric | Belum aktif | Menunggu TLS/WSS, Gateway heartbeat/recovery, serta parser JSON lengkap. |
 
@@ -30,6 +32,7 @@ Prasyaratnya hanya `nasm`, GNU `ld`, `make`, Python 3, dan `curl` untuk test.
 
 ```bash
 make all
+make test-crypto
 make inspect
 ./tests/run-local.sh
 ```
@@ -81,7 +84,7 @@ Rincian checkpoint dan kriteria aktivasi ada di [`docs/discord-transport-contrac
 
 ## Pengujian yang sudah lulus
 
-Skrip `tests/run-local.sh` secara otomatis memverifikasi bahwa binary dapat dibangun, statis, tidak memiliki dynamic dependency, merespons health check, menolak token panel yang tidak sah, dan menjawab WebSocket Ping dengan Pong. Smoke test handshake juga memeriksa nilai `Sec-WebSocket-Accept` terhadap vektor contoh RFC 6455.
+Skrip `tests/run-local.sh` secara otomatis memverifikasi bahwa binary dapat dibangun, statis, tidak memiliki dynamic dependency, bahwa vektor SHA-256/HMAC-SHA256/HKDF lulus, merespons health check, menolak token panel yang tidak sah, dan menjawab WebSocket Ping dengan Pong. Smoke test handshake juga memeriksa nilai `Sec-WebSocket-Accept` terhadap vektor contoh RFC 6455.
 
 ## Struktur
 
