@@ -51,6 +51,8 @@ Setelah deploy, panel tersedia pada:
 https://nama-aplikasi-kamu.railway.app/panel
 ```
 
+Gunakan [`docs/railway-deployment-checklist.md`](docs/railway-deployment-checklist.md) untuk urutan konfigurasi rahasia dan verifikasi bridge dua arah setelah service aktif.
+
 ## Build dan test lokal
 
 Runtime hybrid memerlukan Rust 1.88.
