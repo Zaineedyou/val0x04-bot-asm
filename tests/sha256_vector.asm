@@ -4,6 +4,7 @@ DEFAULT REL
 extern sha256_digest
 extern hmac_sha256
 extern hkdf_expand_sha256
+extern tls_parse_record
 global _start
 
 %define SYS_EXIT 60
@@ -77,6 +78,35 @@ _start:
     call check_bytes
     test eax, eax
     jnz .fail
+
+    ; TLS record envelope: one valid record and three rejection cases.
+    lea rdi, [tls_valid_record]
+    mov esi, tls_valid_record_len
+    call tls_parse_record
+    test eax, eax
+    jnz .fail
+    cmp r8d, 22
+    jne .fail
+    cmp rcx, 3
+    jne .fail
+    cmp byte [rdx], 1
+    jne .fail
+
+    lea rdi, [tls_bad_type]
+    mov esi, tls_bad_type_len
+    call tls_parse_record
+    cmp eax, -1
+    jne .fail
+    lea rdi, [tls_truncated]
+    mov esi, tls_truncated_len
+    call tls_parse_record
+    cmp eax, -1
+    jne .fail
+    lea rdi, [tls_oversized]
+    mov esi, tls_oversized_len
+    call tls_parse_record
+    cmp eax, -1
+    jne .fail
 
     mov eax, SYS_EXIT
     xor edi, edi
@@ -180,6 +210,15 @@ hkdf_okm_expected:
     db 0x5d,0xb0,0x2d,0x56,0xec,0xc4,0xc5,0xbf
     db 0x34,0x00,0x72,0x08,0xd5,0xb8,0x87,0x18
     db 0x58,0x65
+
+tls_valid_record: db 22,3,3,0,3,1,2,3
+tls_valid_record_len equ $ - tls_valid_record
+tls_bad_type: db 20,3,3,0,0
+tls_bad_type_len equ $ - tls_bad_type
+tls_truncated: db 23,3,3,0,3,1
+tls_truncated_len equ $ - tls_truncated
+tls_oversized: db 23,3,3,0x41,0x01
+tls_oversized_len equ $ - tls_oversized
 
 section .bss
 digest: resb 32
