@@ -3,16 +3,18 @@ CC ?= gcc
 LD ?= ld
 BUILD_DIR := build
 BINARY := $(BUILD_DIR)/val0x04-asm
-ASM_OBJECTS := $(BUILD_DIR)/main.o $(BUILD_DIR)/sha256.o $(BUILD_DIR)/tls_record.o
+ASM_OBJECTS := $(BUILD_DIR)/main.o $(BUILD_DIR)/sha256.o $(BUILD_DIR)/tls_record.o $(BUILD_DIR)/gateway_protocol.o
 ADAPTER_OBJECTS := $(BUILD_DIR)/driver.o $(BUILD_DIR)/secure_transport.o
 OBJECTS := $(ASM_OBJECTS) $(ADAPTER_OBJECTS)
 CRYPTO_TEST := $(BUILD_DIR)/crypto-vectors
 CRYPTO_TEST_OBJECT := $(BUILD_DIR)/crypto-vectors.o
+GATEWAY_TEST := $(BUILD_DIR)/gateway-vectors
+GATEWAY_TEST_OBJECT := $(BUILD_DIR)/gateway-vectors.o
 CFLAGS := -O2 -std=c11 -Wall -Wextra -Werror
 CURL_CFLAGS := $(shell pkg-config --cflags libcurl)
 CURL_LIBS := $(shell pkg-config --libs libcurl)
 
-.PHONY: all clean run inspect test-crypto source-ratio
+.PHONY: all clean run inspect test-crypto test-gateway source-ratio
 
 all: $(BINARY)
 
@@ -26,6 +28,9 @@ $(BUILD_DIR)/sha256.o: src/sha256.asm | $(BUILD_DIR)
 	$(NASM) -f elf64 -g -F dwarf $< -o $@
 
 $(BUILD_DIR)/tls_record.o: src/tls_record.asm | $(BUILD_DIR)
+	$(NASM) -f elf64 -g -F dwarf $< -o $@
+
+$(BUILD_DIR)/gateway_protocol.o: src/gateway_protocol.asm | $(BUILD_DIR)
 	$(NASM) -f elf64 -g -F dwarf $< -o $@
 
 $(BUILD_DIR)/driver.o: adapter/driver.c | $(BUILD_DIR)
@@ -45,6 +50,15 @@ $(CRYPTO_TEST): $(CRYPTO_TEST_OBJECT) $(BUILD_DIR)/sha256.o $(BUILD_DIR)/tls_rec
 
 test-crypto: $(CRYPTO_TEST)
 	./$(CRYPTO_TEST)
+
+$(GATEWAY_TEST_OBJECT): tests/gateway_vector.asm | $(BUILD_DIR)
+	$(NASM) -f elf64 -g -F dwarf $< -o $@
+
+$(GATEWAY_TEST): $(GATEWAY_TEST_OBJECT) $(BUILD_DIR)/gateway_protocol.o
+	$(LD) -static -z noexecstack -o $@ $(GATEWAY_TEST_OBJECT) $(BUILD_DIR)/gateway_protocol.o
+
+test-gateway: $(GATEWAY_TEST)
+	./$(GATEWAY_TEST)
 
 run: $(BINARY)
 	PORT=8080 BRIDGE_WEBSOCKET_AUTH_TOKEN=dev-bridge PANEL_ACCESS_TOKEN=dev-panel ./$(BINARY)

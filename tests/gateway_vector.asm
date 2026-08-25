@@ -1,0 +1,105 @@
+BITS 64
+DEFAULT REL
+
+extern gateway_extract_opcode
+extern gateway_extract_sequence
+extern gateway_build_identify
+extern gateway_build_heartbeat
+global _start
+
+%define SYS_EXIT 60
+
+section .text
+_start:
+    lea rdi, [hello]
+    mov esi, hello_len
+    call gateway_extract_opcode
+    cmp eax, 10
+    jne .fail
+
+    lea rdi, [dispatch]
+    mov esi, dispatch_len
+    call gateway_extract_sequence
+    cmp rax, 42
+    jne .fail
+    cmp edx, 1
+    jne .fail
+
+    lea rdi, [null_sequence]
+    mov esi, null_sequence_len
+    call gateway_extract_sequence
+    test rax, rax
+    jnz .fail
+    test edx, edx
+    jnz .fail
+
+    lea rdi, [identify_output]
+    mov esi, 256
+    lea rdx, [token]
+    mov ecx, token_len
+    call gateway_build_identify
+    cmp eax, identify_expected_len
+    jne .fail
+    lea rdi, [identify_output]
+    lea rsi, [identify_expected]
+    mov edx, identify_expected_len
+    call compare_bytes
+    test eax, eax
+    jnz .fail
+
+    lea rdi, [heartbeat_output]
+    mov esi, 64
+    mov edx, 42
+    mov ecx, 1
+    call gateway_build_heartbeat
+    cmp eax, heartbeat_expected_len
+    jne .fail
+    lea rdi, [heartbeat_output]
+    lea rsi, [heartbeat_expected]
+    mov edx, heartbeat_expected_len
+    call compare_bytes
+    test eax, eax
+    jnz .fail
+
+    mov eax, SYS_EXIT
+    xor edi, edi
+    syscall
+.fail:
+    mov eax, SYS_EXIT
+    mov edi, 1
+    syscall
+
+compare_bytes:
+    xor ecx, ecx
+.loop:
+    cmp ecx, edx
+    jae .equal
+    mov al, [rdi + rcx]
+    cmp al, [rsi + rcx]
+    jne .not_equal
+    inc ecx
+    jmp .loop
+.equal:
+    xor eax, eax
+    ret
+.not_equal:
+    mov eax, 1
+    ret
+
+section .rodata
+hello: db '{"op":10,"d":{"heartbeat_interval":45000}}'
+hello_len equ $ - hello
+dispatch: db '{"op":0,"s":42,"t":"MESSAGE_CREATE"}'
+dispatch_len equ $ - dispatch
+null_sequence: db '{"op":10,"s":null}'
+null_sequence_len equ $ - null_sequence
+token: db 'abc.def'
+token_len equ $ - token
+identify_expected: db '{"op":2,"d":{"token":"abc.def","intents":37377,"properties":{"os":"linux","browser":"val0x04-asm","device":"val0x04-asm"}}}'
+identify_expected_len equ $ - identify_expected
+heartbeat_expected: db '{"op":1,"d":42}'
+heartbeat_expected_len equ $ - heartbeat_expected
+
+section .bss
+identify_output: resb 256
+heartbeat_output: resb 64
