@@ -15,13 +15,13 @@ Binary saat ini menjalankan bridge HTTP/WebSocket Fabric dan worker Discord Gate
 | TLS | Negosiasi TLS dan pemeriksaan record melalui libcurl/TLS backend | Ditangani library |
 | Identitas server | Verifikasi hostname dan rantai sertifikat melalui libcurl/TLS backend | Ditangani library |
 | HTTP Discord | Header bot, JSON terbatas, timeout, dan status HTTP | Aktif |
-| Rate limit REST | Penanganan retry berbasis `429` | Tahap berikutnya |
-| Gateway v10 | WSS, `Hello`, jitter heartbeat, `Identify`, ACK, `READY`, dan reconnect | Aktif; resume belum digunakan |
-| Pesan Discord | Filter channel, abaikan pesan bot, parsing string JSON, dan forwarding chat | Aktif; role tertinggi belum diteruskan |
+| Rate limit REST | Penanganan retry berbasis `429` dengan backoff terbatas | Aktif |
+| Gateway v10 | WSS, `Hello`, jitter heartbeat, `Identify`, ACK, `READY`, reconnect, dan Resume | Aktif |
+| Pesan Discord | Filter channel, abaikan pesan bot, parsing string JSON, forwarding chat, dan role tertinggi | Aktif melalui REST HTTPS tervalidasi |
 
 ## Protokol target
 
-Untuk Discord Gateway, transport target mengambil URL Gateway, membuka `wss://…?v=10&encoding=json`, menerima `Hello` (`op:10`), memulai heartbeat dengan interval dari server, lalu mengirim `Identify` (`op:2`) memakai intents yang dibutuhkan. Sequence terakhir harus digunakan pada heartbeat dan resume. `READY` memasok `session_id` serta `resume_gateway_url` yang wajib dipertahankan untuk recovery koneksi.[1]
+Untuk Discord Gateway, transport target mengambil URL Gateway, membuka `wss://…?v=10&encoding=json`, menerima `Hello` (`op:10`), memulai heartbeat dengan interval dari server, lalu mengirim `Identify` (`op:2`) memakai intents yang dibutuhkan. Sequence terakhir digunakan pada heartbeat dan Resume. `READY` memasok `session_id` serta `resume_gateway_url`, dan worker menyimpannya untuk recovery koneksi.[1]
 
 Gateway hanya dapat dianggap sehat apabila setiap heartbeat memperoleh ACK. Koneksi yang tidak menerima ACK sebelum heartbeat berikutnya wajib dianggap putus dan harus direkoneksi. Untuk mengirim event Minecraft dan pesan dari panel, REST menggunakan endpoint Discord yang autentikasi Bot-nya dilakukan melalui header `Authorization`, JSON body, dan respons rate-limit.[2]
 

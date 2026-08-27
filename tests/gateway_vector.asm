@@ -5,6 +5,7 @@ extern gateway_extract_opcode
 extern gateway_extract_sequence
 extern gateway_build_identify
 extern gateway_build_heartbeat
+extern gateway_build_resume
 global _start
 
 %define SYS_EXIT 60
@@ -61,6 +62,23 @@ _start:
     test eax, eax
     jnz .fail
 
+    lea rdi, [resume_output]
+    mov esi, 256
+    lea rdx, [token]
+    mov ecx, token_len
+    lea r8, [session]
+    mov r9d, session_len
+    mov r10, 42
+    call gateway_build_resume
+    cmp eax, resume_expected_len
+    jne .fail
+    lea rdi, [resume_output]
+    lea rsi, [resume_expected]
+    mov edx, resume_expected_len
+    call compare_bytes
+    test eax, eax
+    jnz .fail
+
     mov eax, SYS_EXIT
     xor edi, edi
     syscall
@@ -99,7 +117,12 @@ identify_expected: db '{"op":2,"d":{"token":"abc.def","intents":33283,"propertie
 identify_expected_len equ $ - identify_expected
 heartbeat_expected: db '{"op":1,"d":42}'
 heartbeat_expected_len equ $ - heartbeat_expected
+session: db 'session-1'
+session_len equ $ - session
+resume_expected: db '{"op":6,"d":{"token":"abc.def","session_id":"session-1","seq":42}}'
+resume_expected_len equ $ - resume_expected
 
 section .bss
 identify_output: resb 256
 heartbeat_output: resb 64
+resume_output: resb 256

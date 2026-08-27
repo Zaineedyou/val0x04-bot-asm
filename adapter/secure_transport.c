@@ -165,6 +165,78 @@ static size_t discard_response(char *ptr, size_t size, size_t nmemb, void *userd
     return size * nmemb;
 }
 
+struct response_buffer {
+    char *data;
+    size_t cap;
+    size_t len;
+};
+
+static size_t bounded_response(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    struct response_buffer *response = userdata;
+    size_t incoming = size * nmemb;
+    size_t available;
+
+    if (!response || !response->data || response->cap == 0) return 0;
+    available = response->cap - 1 - response->len;
+    if (incoming > available) return 0;
+    memcpy(response->data + response->len, ptr, incoming);
+    response->len += incoming;
+    response->data[response->len] = 0;
+    return incoming;
+}
+
+long secure_https_get_json(const char *url,
+                           const char *authorization,
+                           char *out,
+                           size_t out_cap,
+                           size_t *out_len,
+                           long *http_status) {
+    CURL *handle;
+    struct curl_slist *headers = NULL;
+    struct response_buffer response;
+    CURLcode code;
+    int configured;
+    long status = 0;
+
+    if (!url || !authorization || !out || !out_len || !http_status || out_cap < 2)
+        return -EINVAL;
+    *out_len = 0;
+    *http_status = 0;
+    out[0] = 0;
+    response = (struct response_buffer){.data = out, .cap = out_cap, .len = 0};
+    handle = curl_easy_init();
+    if (!handle) return -ENOMEM;
+    configured = configure_secure_handle(handle);
+    if (configured != 0) {
+        curl_easy_cleanup(handle);
+        return configured;
+    }
+    headers = curl_slist_append(headers, "Accept: application/json");
+    headers = curl_slist_append(headers, authorization);
+    if (!headers) {
+        curl_easy_cleanup(handle);
+        return -ENOMEM;
+    }
+    code = curl_easy_setopt(handle, CURLOPT_URL, url);
+    if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+    if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
+    if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, bounded_response);
+    if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_WRITEDATA, &response);
+    if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, 15000L);
+    if (code == CURLE_OK) code = curl_easy_perform(handle);
+    if (code == CURLE_OK) code = curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(handle);
+    if (code != CURLE_OK) {
+        if (!last_error[0])
+            strncpy(last_error, curl_easy_strerror(code), sizeof(last_error) - 1);
+        return -(long)code;
+    }
+    *out_len = response.len;
+    *http_status = status;
+    return 0;
+}
+
 long secure_https_post_json(const char *url,
                             const char *authorization,
                             const char *json,

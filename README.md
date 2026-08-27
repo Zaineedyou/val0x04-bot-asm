@@ -32,8 +32,9 @@ Adapter selalu mengaktifkan certificate dan hostname verification; tidak ada ops
 | HTTP/panel/WebSocket Fabric | Berjalan dan diuji lokal |
 | Panel → Discord REST HTTPS | Dibangun oleh NASM dan dikirim melalui adapter TLS libcurl |
 | Fabric chat → Discord REST | Berjalan melalui formatter JSON NASM |
-| Discord Gateway → Fabric | Worker Gateway NASM terpisah; Identify, heartbeat, ACK, reconnect, filter channel/bot, dan forwarding chat aktif |
-| Resume Gateway | Belum digunakan; reconnect melakukan Identify ulang pada sesi baru |
+| Discord Gateway → Fabric | Worker Gateway NASM terpisah; Identify, heartbeat, ACK, READY, reconnect, filter channel/bot, role tertinggi, dan forwarding chat aktif |
+| Resume Gateway | `session_id`, `resume_gateway_url`, dan sequence terakhir disimpan untuk Resume setelah reconnect |
+| Rate limit REST | Status `429` dicoba ulang dengan backoff eksponensial terbatas |
 | Container Railway | Membangun NASM + C/libcurl langsung, tanpa Rust |
 
 ## Build dan test lokal

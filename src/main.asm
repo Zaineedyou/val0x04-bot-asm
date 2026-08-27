@@ -11,6 +11,7 @@ extern secure_gateway_close
 extern secure_gateway_socket
 extern secure_gateway_send
 extern secure_gateway_recv
+extern secure_https_get_json
 extern gateway_worker
 extern gateway_escape_copy
 extern gateway_copy
@@ -592,6 +593,8 @@ send_discord_json_buffer:
     call memory_copy
     mov byte [rdi + rdx], 0
 
+    xor r14d, r14d
+.rest_retry:
     lea rdi, [discord_url]
     lea rsi, [discord_authorization]
     lea rdx, [discord_json]
@@ -601,6 +604,18 @@ send_discord_json_buffer:
     test rax, rax
     jnz .bad
     mov rax, [discord_http_status]
+    cmp rax, 429
+    jne .status_check
+    cmp r14d, 3
+    jae .bad
+    mov eax, 1
+    mov ecx, r14d
+    shl eax, cl
+    mov [rest_sleep_seconds], rax
+    call rest_sleep
+    inc r14d
+    jmp .rest_retry
+.status_check:
     cmp rax, 200
     jb .bad
     cmp rax, 300
@@ -615,6 +630,16 @@ send_discord_json_buffer:
     pop r13
     pop r12
     pop rbx
+    ret
+
+rest_sleep:
+    mov rax, [rest_sleep_seconds]
+    mov [rest_sleep_timespec], rax
+    mov qword [rest_sleep_timespec + 8], 0
+    mov eax, SYS_NANOSLEEP
+    lea rdi, [rest_sleep_timespec]
+    xor esi, esi
+    syscall
     ret
 
 ; Validate `Authorization: Bearer <PANEL_ACCESS_TOKEN>` with a CRLF boundary.
@@ -1350,29 +1375,33 @@ build_fabric_event:
 .join:
     lea rsi, [title_player_joined]
     mov edx, title_player_joined_len
+    call extract_player
     lea rcx, [event_player]
-    mov r8d, 512
+    mov r8d, [event_player_len]
     call build_embed_with_field
     jmp .send
 .leave:
     lea rsi, [title_player_left]
     mov edx, title_player_left_len
+    call extract_player
     lea rcx, [event_player]
-    mov r8d, 512
+    mov r8d, [event_player_len]
     call build_embed_with_field
     jmp .send
 .death:
     lea rsi, [title_death]
     mov edx, title_death_len
+    call extract_message
     lea rcx, [event_message]
-    mov r8d, 2048
+    mov r8d, [event_message_len]
     call build_embed_with_field
     jmp .send
 .advancement:
     lea rsi, [title_advancement]
     mov edx, title_advancement_len
+    call extract_message
     lea rcx, [event_message]
-    mov r8d, 2048
+    mov r8d, [event_message_len]
     call build_embed_with_field
     jmp .send
 .bridge_status:
@@ -1476,13 +1505,16 @@ build_embed_with_field:
     push r12
     push r13
     push r14
+    push r15
     mov r12, rsi
     mov r13d, edx
     mov r14, rcx
-    mov [event_field_capacity], r8d
-    mov rdi, r14
-    mov rdx, [event_field_capacity]
-    call extract_event_field
+    mov r15d, r8d
+    lea rdi, [event_field]
+    mov rsi, r14
+    mov edx, r15d
+    call gateway_copy
+    mov [event_field_len], r15d
     lea rdi, [discord_json]
     lea rsi, [embed_prefix]
     mov edx, embed_prefix_len
@@ -1510,6 +1542,7 @@ build_embed_with_field:
     call gateway_copy
     add r14d, json_embed_close_len
     mov [fabric_json_length], r14
+    pop r15
     pop r14
     pop r13
     pop r12
@@ -1560,6 +1593,14 @@ extract_player:
     lea r8, [event_player]
     mov r9d, 512
     call extract_json_string
+    cmp eax, -1
+    jne .player_done
+    lea rdi, [event_player]
+    lea rsi, [default_unknown]
+    mov edx, default_unknown_len
+    call gateway_copy
+    mov eax, default_unknown_len
+.player_done:
     mov [event_player_len], eax
     pop rdi
     ret
@@ -1572,6 +1613,10 @@ extract_message:
     lea r8, [event_message]
     mov r9d, 2048
     call extract_json_string
+    cmp eax, -1
+    jne .message_done
+    xor eax, eax
+.message_done:
     mov [event_message_len], eax
     pop rdi
     ret
@@ -1743,6 +1788,8 @@ description_server_stop: db 'Server sedang dimatikan.'
 description_server_stop_len equ $ - description_server_stop
 description_bridge_status: db 'Status bridge berubah.'
 description_bridge_status_len equ $ - description_bridge_status
+default_unknown:         db 'Unknown'
+default_unknown_len equ $ - default_unknown
 authorization_prefix:  db 'Authorization: Bearer '
 authorization_prefix_len equ $ - authorization_prefix
 header_terminator:      db 13,10,13,10
@@ -1840,6 +1887,7 @@ gateway_pipe_write:     dd -1
 gateway_pid:            dd -1
 bridge_active:          dd 0
 gateway_message_length:  dd 0
+rest_sleep_seconds:      dq 0
 event_type_len:         dd 0
 event_player_len:       dd 0
 event_message_len:      dd 0
@@ -1880,6 +1928,7 @@ ws_mask:                resb 4
 ws_payload:             resb 4096
 ws_out_header:          resb 2
 gateway_message_buffer:  resb 65536
+rest_sleep_timespec:     resb 16
 discord_url:            resb 256
 discord_authorization:  resb 512
 discord_json:           resb 4096

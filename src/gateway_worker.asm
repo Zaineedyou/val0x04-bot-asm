@@ -6,10 +6,12 @@ extern secure_gateway_close
 extern secure_gateway_socket
 extern secure_gateway_send
 extern secure_gateway_recv
+extern secure_https_get_json
 extern gateway_extract_opcode
 extern gateway_extract_sequence
 extern gateway_build_identify
 extern gateway_build_heartbeat
+extern gateway_build_resume
 extern discord_token_ptr
 extern discord_token_len
 extern discord_channel_ptr
@@ -51,19 +53,27 @@ gateway_worker:
 ; process so a stalled remote connection cannot stop the local bridge.
 gateway_connect_loop:
 .reconnect:
-    lea rdi, [gateway_url]
+    mov rdi, [gateway_connect_url]
     call secure_gateway_connect
     test eax, eax
     js .retry
     call gateway_wait_hello
     test eax, eax
     js .close_retry
+    cmp dword [gateway_session_valid], 0
+    je .identify
+    call gateway_resume
+    test eax, eax
+    jz .session
+    call gateway_clear_session
+    jmp .close_retry
+.identify:
+    mov qword [gateway_sequence], 0
     call gateway_identify
     test eax, eax
     js .close_retry
+.session:
     call gateway_session_loop
-    test eax, eax
-    jz .close_retry
 .close_retry:
     call secure_gateway_close
 .retry:
@@ -131,6 +141,101 @@ gateway_identify:
     mov eax, -1
     ret
 
+gateway_resume:
+    cmp dword [gateway_session_valid], 0
+    je .bad
+    lea rdi, [gateway_resume_buffer]
+    mov esi, 16384
+    mov rdx, [discord_token_ptr]
+    mov ecx, [discord_token_len]
+    lea r8, [gateway_session_id]
+    mov r9d, [gateway_session_id_len]
+    mov r10, [gateway_sequence]
+    call gateway_build_resume
+    cmp eax, -1
+    je .bad
+    mov esi, eax
+    lea rdi, [gateway_resume_buffer]
+    mov edx, CURLWS_TEXT
+    call secure_gateway_send
+    test rax, rax
+    js .bad
+    xor eax, eax
+    ret
+.bad:
+    mov eax, -1
+    ret
+
+gateway_clear_session:
+    mov dword [gateway_session_valid], 0
+    lea rax, [gateway_url]
+    mov [gateway_connect_url], rax
+    ret
+
+gateway_capture_ready:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, [gateway_packet]
+    mov r13, [gateway_packet_len]
+
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [session_id_key]
+    mov ecx, session_id_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .bad
+    mov r14, rax
+    add r14, session_id_key_len
+    mov rdi, r14
+    mov rsi, r13
+    sub rsi, r14
+    add rsi, r12
+    lea rdx, [gateway_session_id]
+    mov ecx, 256
+    call gateway_decode_string
+    cmp eax, -1
+    je .bad
+    mov [gateway_session_id_len], eax
+
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [resume_url_key]
+    mov ecx, resume_url_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .bad
+    add rax, resume_url_key_len
+    mov rdi, rax
+    mov rsi, r13
+    sub rsi, rax
+    add rsi, r12
+    lea rdx, [gateway_resume_url]
+    mov ecx, 256
+    call gateway_decode_string
+    cmp eax, -1
+    je .bad
+    test eax, eax
+    jz .bad
+    lea rax, [gateway_resume_url]
+    mov [gateway_connect_url], rax
+    mov dword [gateway_session_valid], 1
+    xor eax, eax
+    jmp .out
+.bad:
+    mov dword [gateway_session_valid], 0
+    lea rax, [gateway_url]
+    mov [gateway_connect_url], rax
+    mov eax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
 gateway_session_loop:
 .loop:
     call gateway_check_heartbeat
@@ -171,10 +276,17 @@ gateway_dispatch_packet:
     cmp eax, 7
     je .reconnect
     cmp eax, 9
-    je .reconnect
+    je .invalid_session
     cmp eax, 0
     jne .ok
 
+    mov rdi, [gateway_packet]
+    mov rsi, [gateway_packet_len]
+    lea rdx, [ready_key]
+    mov ecx, ready_key_len
+    call gateway_find_key
+    test rax, rax
+    jnz .ready
     mov rdi, [gateway_packet]
     mov rsi, [gateway_packet_len]
     lea rdx, [message_create_key]
@@ -185,6 +297,9 @@ gateway_dispatch_packet:
     mov rdi, [gateway_packet]
     mov rsi, [gateway_packet_len]
     call gateway_forward_message
+    jmp .ok
+.ready:
+    call gateway_capture_ready
 .ok:
     xor eax, eax
     ret
@@ -198,7 +313,10 @@ gateway_dispatch_packet:
 .reconnect:
     mov eax, -1
     ret
-
+.invalid_session:
+    call gateway_clear_session
+    mov eax, -1
+    ret
 ; Send a heartbeat and require its ACK before the next interval.
 gateway_send_heartbeat:
     lea rdi, [gateway_heartbeat_buffer]
@@ -404,6 +522,7 @@ gateway_forward_message:
     cmp eax, -1
     je .out
     mov [gateway_content_len], eax
+    call gateway_fetch_highest_role
 
     lea rdi, [gateway_outgoing]
     lea rsi, [outgoing_prefix]
@@ -425,9 +544,24 @@ gateway_forward_message:
     add r14d, outgoing_middle_len
     lea rdi, [gateway_outgoing + outgoing_prefix_len]
     add rdi, r14
+    lea rsi, [gateway_role_name]
+    mov edx, [gateway_role_name_len]
+    mov ecx, 16384 - outgoing_prefix_len - outgoing_middle_len
+    call gateway_escape_copy
+    cmp eax, -1
+    je .out
+    add r14d, eax
+    lea rdi, [gateway_outgoing + outgoing_prefix_len]
+    add rdi, r14
+    lea rsi, [outgoing_role_middle]
+    mov edx, outgoing_role_middle_len
+    call gateway_copy
+    add r14d, outgoing_role_middle_len
+    lea rdi, [gateway_outgoing + outgoing_prefix_len]
+    add rdi, r14
     lea rsi, [gateway_content]
     mov edx, [gateway_content_len]
-    mov ecx, 16384 - outgoing_prefix_len - outgoing_middle_len
+    mov ecx, 16384 - outgoing_prefix_len - outgoing_middle_len - outgoing_role_middle_len
     call gateway_escape_copy
     cmp eax, -1
     je .out
@@ -449,6 +583,223 @@ gateway_forward_message:
     pop r14
     pop r13
     pop r12
+    ret
+
+gateway_fetch_highest_role:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov dword [gateway_role_name_len], 0
+    mov r12, [gateway_packet]
+    mov r13, [gateway_packet_len]
+
+    ; Get guild_id from MESSAGE_CREATE.
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [guild_id_key]
+    mov ecx, guild_id_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .out
+    add rax, guild_id_key_len
+    mov rdi, rax
+    mov rsi, r13
+    sub rsi, rax
+    add rsi, r12
+    lea rdx, [gateway_role_id]
+    mov ecx, 64
+    call gateway_decode_string
+    cmp eax, -1
+    je .out
+    mov [gateway_role_id_len], eax
+
+    ; Find the member role id array in the event.
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [roles_array_key]
+    mov ecx, roles_array_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .out
+    add rax, roles_array_key_len
+    mov [gateway_role_member_start], rax
+    mov rdi, rax
+    mov rsi, r13
+    sub rsi, rax
+    add rsi, r12
+    mov dl, ']'
+    call gateway_find_byte
+    test rax, rax
+    jz .out
+    sub rax, [gateway_role_member_start]
+    mov [gateway_role_member_len], rax
+
+    ; Build Authorization and /guilds/<id>/roles.
+    lea rdi, [gateway_rest_auth]
+    lea rsi, [bot_auth_prefix]
+    mov edx, bot_auth_prefix_len
+    call gateway_copy
+    lea rdi, [gateway_rest_auth + bot_auth_prefix_len]
+    mov rsi, [discord_token_ptr]
+    mov edx, [discord_token_len]
+    call gateway_copy
+    mov eax, bot_auth_prefix_len
+    add eax, [discord_token_len]
+    mov byte [gateway_rest_auth + rax], 0
+
+    lea rdi, [gateway_role_url]
+    lea rsi, [roles_url_prefix]
+    mov edx, roles_url_prefix_len
+    call gateway_copy
+    lea rdi, [gateway_role_url + roles_url_prefix_len]
+    lea rsi, [gateway_role_id]
+    mov edx, [gateway_role_id_len]
+    call gateway_copy
+    mov eax, roles_url_prefix_len
+    add eax, [gateway_role_id_len]
+    lea rdi, [gateway_role_url + rax]
+    lea rsi, [roles_url_suffix]
+    mov edx, roles_url_suffix_len
+    call gateway_copy
+    mov eax, roles_url_prefix_len
+    add eax, [gateway_role_id_len]
+    add eax, roles_url_suffix_len
+    mov byte [gateway_role_url + rax], 0
+
+    lea rdi, [gateway_role_url]
+    lea rsi, [gateway_rest_auth]
+    lea rdx, [gateway_role_response]
+    mov ecx, 32768
+    lea r8, [gateway_role_response_len]
+    lea r9, [gateway_role_http_status]
+    call secure_https_get_json
+    test rax, rax
+    js .out
+    mov rax, [gateway_role_http_status]
+    cmp rax, 200
+    jb .out
+    cmp rax, 300
+    jae .out
+
+    mov qword [gateway_best_position], -1
+    mov r14, gateway_role_response
+    mov r15, [gateway_role_response_len]
+.scan_role:
+    mov rdi, r14
+    mov rsi, r15
+    lea rdx, [role_id_key]
+    mov ecx, role_id_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .out
+    add rax, role_id_key_len
+    mov rdi, rax
+    mov rsi, r15
+    sub rsi, rax
+    add rsi, r14
+    lea rdx, [gateway_role_id]
+    mov ecx, 64
+    call gateway_decode_string
+    cmp eax, -1
+    je .out
+    mov [gateway_role_id_len], eax
+
+    lea rdi, [gateway_role_needle]
+    mov byte [rdi], '"'
+    inc rdi
+    lea rsi, [gateway_role_id]
+    mov edx, [gateway_role_id_len]
+    call gateway_copy
+    mov eax, [gateway_role_id_len]
+    lea rdi, [gateway_role_needle + 1]
+    add rdi, rax
+    mov byte [rdi], '"'
+    mov eax, [gateway_role_id_len]
+    inc eax
+    inc eax
+    mov [gateway_role_needle_len], eax
+
+    mov rdi, [gateway_role_member_start]
+    mov rsi, [gateway_role_member_len]
+    lea rdx, [gateway_role_needle]
+    mov ecx, [gateway_role_needle_len]
+    call gateway_find_key
+    test rax, rax
+    jz .next_role
+
+    mov rdi, r14
+    mov rsi, r15
+    lea rdx, [role_name_key]
+    mov ecx, role_name_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .next_role
+    add rax, role_name_key_len
+    mov rdi, rax
+    mov rsi, r15
+    sub rsi, rax
+    add rsi, r14
+    lea rdx, [gateway_role_name]
+    mov ecx, 512
+    call gateway_decode_string
+    cmp eax, -1
+    je .next_role
+    mov [gateway_role_name_len], eax
+
+    mov rdi, r14
+    mov rsi, r15
+    lea rdx, [role_position_key]
+    mov ecx, role_position_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .next_role
+    add rax, role_position_key_len
+    mov rdi, rax
+    mov rsi, 32
+    call gateway_parse_u64
+    cmp eax, -1
+    je .next_role
+    cmp rax, [gateway_best_position]
+    jbe .next_role
+    mov [gateway_best_position], rax
+.next_role:
+    mov rdi, r14
+    mov rsi, r15
+    lea rdx, [role_id_key]
+    mov ecx, role_id_key_len
+    call gateway_find_key
+    test rax, rax
+    jz .out
+    add rax, role_id_key_len
+    mov r14, rax
+    mov rax, [gateway_role_response]
+    add rax, [gateway_role_response_len]
+    sub rax, r14
+    mov r15, rax
+    test r15, r15
+    jnz .scan_role
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+gateway_find_byte:
+    test rsi, rsi
+    jz .none
+.loop:
+    cmp byte [rdi], dl
+    je .found
+    inc rdi
+    dec rsi
+    jnz .loop
+.none:
+    xor eax, eax
+    ret
+.found:
+    mov rax, rdi
     ret
 
 ; Find a literal key in a bounded JSON buffer.
@@ -768,8 +1119,28 @@ hello_interval_key: db '"heartbeat_interval":'
 hello_interval_key_len equ $ - hello_interval_key
 message_create_key: db '"t":"MESSAGE_CREATE"'
 message_create_key_len equ $ - message_create_key
+ready_key: db '"t":"READY"'
+ready_key_len equ $ - ready_key
+session_id_key: db '"session_id":"'
+session_id_key_len equ $ - session_id_key
+resume_url_key: db '"resume_gateway_url":"'
+resume_url_key_len equ $ - resume_url_key
 channel_id_key: db '"channel_id":"'
 channel_id_key_len equ $ - channel_id_key
+guild_id_key: db '"guild_id":"'
+guild_id_key_len equ $ - guild_id_key
+roles_array_key: db '"roles":['
+roles_array_key_len equ $ - roles_array_key
+role_id_key: db '"id":"'
+role_id_key_len equ $ - role_id_key
+role_name_key: db '"name":"'
+role_name_key_len equ $ - role_name_key
+role_position_key: db '"position":'
+role_position_key_len equ $ - role_position_key
+roles_url_prefix: db 'https://discord.com/api/v10/guilds/'
+roles_url_prefix_len equ $ - roles_url_prefix
+roles_url_suffix: db '/roles'
+roles_url_suffix_len equ $ - roles_url_suffix
 bot_key: db '"bot":'
 bot_key_len equ $ - bot_key
 username_key: db '"username":"'
@@ -778,8 +1149,12 @@ content_key: db '"content":"'
 content_key_len equ $ - content_key
 outgoing_prefix: db '{"type":"chat","author":"'
 outgoing_prefix_len equ $ - outgoing_prefix
-outgoing_middle: db '","role":"","message":"'
+outgoing_middle: db '","role":"'
 outgoing_middle_len equ $ - outgoing_middle
+outgoing_role_middle: db '","message":"'
+outgoing_role_middle_len equ $ - outgoing_role_middle
+bot_auth_prefix: db 'Bot '
+bot_auth_prefix_len equ $ - bot_auth_prefix
 outgoing_suffix: db '"}'
 outgoing_suffix_len equ $ - outgoing_suffix
 
@@ -787,6 +1162,9 @@ section .data
 align 8
 heartbeat_interval_ms: dq 45000
 heartbeat_due_ms: dq 0
+gateway_connect_url: dq gateway_url
+gateway_session_valid: dd 0
+gateway_session_id_len: dd 0
 gateway_sequence: dq 0
 gateway_packet_len: dq 0
 gateway_bytes_left: dq 0
@@ -796,16 +1174,33 @@ gateway_frame_flags: dd 0
 heartbeat_waiting: dd 0
 gateway_author_len: dd 0
 gateway_content_len: dd 0
+gateway_role_name_len: dd 0
+gateway_role_id_len: dd 0
+gateway_role_needle_len: dd 0
+gateway_role_response_len: dq 0
+gateway_role_http_status: dq 0
+gateway_best_position: dq -1
 
 section .bss
 align 16
 gateway_packet_buffer: resb 16384
 gateway_identify_buffer: resb 16384
 gateway_heartbeat_buffer: resb 256
+gateway_resume_buffer: resb 16384
+gateway_session_id: resb 256
+gateway_resume_url: resb 256
 gateway_channel: resb 64
 gateway_author: resb 1024
 gateway_content: resb 8192
 gateway_outgoing: resb 16384
+gateway_rest_auth: resb 512
+gateway_role_url: resb 256
+gateway_role_response: resb 32768
+gateway_role_id: resb 64
+gateway_role_name: resb 512
+gateway_role_needle: resb 80
+gateway_role_member_start: resq 1
+gateway_role_member_len: resq 1
 jitter_bytes: resb 8
 gateway_poll_entry: resb 8
 gateway_timespec: resb 16

@@ -9,6 +9,7 @@ global gateway_extract_opcode
 global gateway_extract_sequence
 global gateway_build_identify
 global gateway_build_heartbeat
+global gateway_build_resume
 
 section .text
 
@@ -213,6 +214,86 @@ gateway_copy:
 .done:
     ret
 
+; rdi=output, rsi=capacity, rdx=token, rcx=token length,
+; r8=session id, r9=session length, r10=sequence. EAX=output length or -1.
+gateway_build_resume:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov r15, rcx
+    mov rbx, r8
+    mov r11, r9
+    mov rax, r15
+    add rax, r11
+    add rax, resume_prefix_len + resume_middle_len + resume_suffix_len + 20
+    cmp r13, rax
+    jb .bad
+    mov rdi, r12
+    lea rsi, [resume_prefix]
+    mov edx, resume_prefix_len
+    call gateway_copy
+    lea rdi, [r12 + resume_prefix_len]
+    mov rsi, r14
+    mov rdx, r15
+    call gateway_copy
+    lea rdi, [r12 + resume_prefix_len]
+    add rdi, r15
+    lea rsi, [resume_middle]
+    mov edx, resume_middle_len
+    call gateway_copy
+    lea rdi, [r12 + resume_prefix_len]
+    add rdi, r15
+    add rdi, resume_middle_len
+    mov rsi, rbx
+    mov rdx, r11
+    call gateway_copy
+    lea rdi, [r12 + resume_prefix_len]
+    add rdi, r15
+    add rdi, resume_middle_len
+    add rdi, r11
+    lea rsi, [resume_seq_prefix]
+    mov edx, resume_seq_prefix_len
+    call gateway_copy
+    lea rdi, [r12 + resume_prefix_len]
+    add rdi, r15
+    add rdi, resume_middle_len
+    add rdi, r11
+    add rdi, resume_seq_prefix_len
+    mov rax, r10
+    call gateway_write_u64
+    mov r9d, eax
+    lea rdi, [r12 + resume_prefix_len]
+    add rdi, r15
+    add rdi, resume_middle_len
+    add rdi, r11
+    add rdi, resume_seq_prefix_len
+    add rdi, r9
+    lea rsi, [resume_suffix]
+    mov edx, resume_suffix_len
+    call gateway_copy
+    mov eax, resume_prefix_len
+    add eax, r15d
+    add eax, resume_middle_len
+    add eax, r11d
+    add eax, resume_seq_prefix_len
+    add eax, r9d
+    add eax, resume_suffix_len
+    jmp .out
+.bad:
+    mov eax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 ; rdi=destination, rax=value. RAX=written decimal count.
 gateway_write_u64:
     lea r8, [gateway_digits + 31]
@@ -271,6 +352,14 @@ heartbeat_prefix: db '{"op":1,"d":'
 heartbeat_prefix_len equ $ - heartbeat_prefix
 heartbeat_suffix: db '}'
 heartbeat_suffix_len equ $ - heartbeat_suffix
+resume_prefix: db '{"op":6,"d":{"token":"'
+resume_prefix_len equ $ - resume_prefix
+resume_middle: db '","session_id":"'
+resume_middle_len equ $ - resume_middle
+resume_seq_prefix: db '","seq":'
+resume_seq_prefix_len equ $ - resume_seq_prefix
+resume_suffix: db '}}'
+resume_suffix_len equ $ - resume_suffix
 json_null: db 'null'
 json_null_len equ $ - json_null
 
