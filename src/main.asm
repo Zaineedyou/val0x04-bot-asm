@@ -1407,8 +1407,37 @@ build_fabric_event:
 .bridge_status:
     lea rsi, [title_bridge_status]
     mov edx, title_bridge_status_len
+    call extract_status
+    lea rdi, [event_field]
+    lea rsi, [status_connect]
+    mov ecx, status_connect_len
+    call memory_equal
+    test al, al
+    jnz .status_connect
+    lea rdi, [event_field]
+    lea rsi, [status_disconnect]
+    mov ecx, status_disconnect_len
+    call memory_equal
+    test al, al
+    jnz .status_disconnect
+    lea rsi, [title_bridge_status]
+    mov edx, title_bridge_status_len
     lea rcx, [description_bridge_status]
     mov r8d, description_bridge_status_len
+    call build_embed_payload
+    jmp .send
+.status_connect:
+    lea rsi, [title_bridge_status]
+    mov edx, title_bridge_status_len
+    lea rcx, [description_bridge_connect]
+    mov r8d, description_bridge_connect_len
+    call build_embed_payload
+    jmp .send
+.status_disconnect:
+    lea rsi, [title_bridge_status]
+    mov edx, title_bridge_status_len
+    lea rcx, [description_bridge_disconnect]
+    mov r8d, description_bridge_disconnect_len
     call build_embed_payload
     jmp .send
 .server_start:
@@ -1604,6 +1633,22 @@ extract_player:
     mov [event_player_len], eax
     pop rdi
     ret
+extract_status:
+    push rdi
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, status_key
+    mov ecx, status_key_len
+    lea r8, [event_field]
+    mov r9d, 2048
+    call extract_json_string
+    cmp eax, -1
+    jne .status_done
+    xor eax, eax
+.status_done:
+    mov [event_field_len], eax
+    pop rdi
+    ret
 extract_message:
     push rdi
     mov rdi, r12
@@ -1788,6 +1833,16 @@ description_server_stop: db 'Server sedang dimatikan.'
 description_server_stop_len equ $ - description_server_stop
 description_bridge_status: db 'Status bridge berubah.'
 description_bridge_status_len equ $ - description_bridge_status
+description_bridge_connect: db 'Bridge tersambung ke server Minecraft.'
+description_bridge_connect_len equ $ - description_bridge_connect
+description_bridge_disconnect: db 'Bridge terputus dari server Minecraft.'
+description_bridge_disconnect_len equ $ - description_bridge_disconnect
+status_key: db '"status":"'
+status_key_len equ $ - status_key
+status_connect: db 'connect'
+status_connect_len equ $ - status_connect
+status_disconnect: db 'disconnect'
+status_disconnect_len equ $ - status_disconnect
 default_unknown:         db 'Unknown'
 default_unknown_len equ $ - default_unknown
 authorization_prefix:  db 'Authorization: Bearer '
