@@ -27,6 +27,7 @@ global write_all
 
 %define SYS_READ            0
 %define SYS_WRITE           1
+%define SYS_OPEN            2
 %define SYS_CLOSE           3
 %define SYS_SOCKET          41
 %define SYS_ACCEPT          43
@@ -41,6 +42,10 @@ global write_all
 %define SYS_PIPE            22
 %define SYS_NANOSLEEP       35
 %define SYS_PRCTL           157
+%define SYS_FLOCK           73
+%define LOCK_EX             2
+%define LOCK_NB             4
+%define LOCK_UN             8
 %define PR_SET_PDEATHSIG    1
 %define SIGTERM             15
 %define CLOCK_MONOTONIC     1
@@ -74,7 +79,6 @@ asm_service_start:
     call spawn_gateway_worker
 
 .accept_loop:
-    call drain_gateway_messages
     mov eax, [server_fd]
     mov [listener_pollfds], eax
     mov word [listener_pollfds + 4], POLLIN
@@ -98,16 +102,57 @@ asm_service_start:
     js .accept_loop
 
     mov rdi, rax
-    call handle_http_request
-
-    mov eax, SYS_CLOSE
-    mov edi, dword [client_fd]
-    syscall
+    call spawn_client_process
     jmp .accept_loop
 
 ; ---------------------------------------------------------------------------
 ; Gateway worker process and parent-to-bridge message pipe.
 ; ---------------------------------------------------------------------------
+open_bridge_lock:
+    mov eax, SYS_OPEN
+    lea rdi, [bridge_lock_path]
+    mov esi, 66
+    mov edx, 0o600
+    syscall
+    test rax, rax
+    js fatal_gateway
+    mov [bridge_lock_fd], eax
+    ret
+
+spawn_client_process:
+    push r12
+    mov r12, rdi
+    mov eax, SYS_FORK
+    syscall
+    test rax, rax
+    js .parent
+    jnz .parent
+    mov [client_fd], r12d
+    mov eax, SYS_PRCTL
+    mov edi, PR_SET_PDEATHSIG
+    mov esi, SIGTERM
+    syscall
+    mov eax, SYS_CLOSE
+    mov edi, [server_fd]
+    syscall
+    mov eax, SYS_CLOSE
+    mov edi, [gateway_pipe_write]
+    syscall
+    mov edi, r12d
+    call handle_http_request
+    mov eax, SYS_CLOSE
+    mov edi, r12d
+    syscall
+    mov eax, SYS_EXIT
+    xor edi, edi
+    syscall
+.parent:
+    mov eax, SYS_CLOSE
+    mov edi, r12d
+    syscall
+    pop r12
+    ret
+
 open_gateway_pipe:
     mov eax, SYS_PIPE
     lea rdi, [gateway_pipe]
@@ -301,11 +346,54 @@ load_environment_from_envp:
     mov rdi, rax
     call cstring_length
     mov [discord_channel_len], eax
+    mov rdi, [discord_channel_ptr]
+    call parse_decimal_u64
+    test edx, edx
+    jz .advance
+    mov dword [config_invalid], 1
 
 .advance:
     add r15, 8
     jmp .env_next
 .done:
+    cmp dword [config_invalid], 0
+    jne fatal_config
+    cmp dword [discord_token_len], 0
+    je fatal_config
+    cmp dword [discord_channel_len], 0
+    je fatal_config
+    cmp dword [bridge_token_len], 0
+    je fatal_config
+    cmp dword [panel_token_len], 0
+    je fatal_config
+    ret
+
+; Parse an unsigned 64-bit decimal value. EDX=0 valid, EDX=1 invalid.
+parse_decimal_u64:
+    xor eax, eax
+    xor edx, edx
+    xor ecx, ecx
+    mov r9, 10
+.loop_u64:
+    movzx r8d, byte [rdi + rcx]
+    test r8b, r8b
+    jz .valid_u64
+    sub r8b, '0'
+    cmp r8b, 9
+    ja .invalid_u64
+    mul r9
+    test rdx, rdx
+    jnz .invalid_u64
+    add rax, r8
+    jc .invalid_u64
+    inc rcx
+    jmp .loop_u64
+.valid_u64:
+    xor edx, edx
+    ret
+.invalid_u64:
+    xor eax, eax
+    mov edx, 1
     ret
 
 ; rdi = candidate, rsi = prefix, rcx = length. AL = 1 when equal.
@@ -454,10 +542,16 @@ handle_http_request:
     test al, al
     jz .unauthorized
     call send_panel_message_to_discord
+    cmp eax, -2
+    je .bad_request
     test eax, eax
     jnz .discord_failure
     lea rsi, [response_discord_sent]
     mov edx, response_discord_sent_len
+    jmp .send
+.bad_request:
+    lea rsi, [response_bad_request]
+    mov edx, response_bad_request_len
     jmp .send
 .discord_failure:
     lea rsi, [response_discord_failure]
@@ -489,8 +583,7 @@ handle_http_request:
 .done:
     ret
 
-; Serialize the request body as a Discord JSON content value. NASM owns the
-; application serialization; the C adapter only performs verified HTTPS.
+; Serialize the validated panel message as a Discord JSON content value.
 ; EAX = 0 only when Discord returns an HTTP 2xx status.
 send_panel_message_to_discord:
     push rbx
@@ -499,39 +592,25 @@ send_panel_message_to_discord:
     push r14
     push r15
     cmp dword [discord_token_len], 0
-    je .bad
+    je .bad_panel_send
     cmp dword [discord_channel_len], 0
-    je .bad
-
-    lea rdi, [request_buffer]
-    lea rsi, [header_terminator]
-    mov ecx, header_terminator_len
-    mov rdx, [request_length]
-    call find_bytes
-    test rax, rax
-    jz .bad
-    add rax, header_terminator_len
-    mov r12, rax
-    lea rdx, [request_buffer]
-    add rdx, [request_length]
-    sub rdx, r12
-    mov r13, rdx
-    test r13, r13
-    jz .bad
-    cmp r13, 2000
-    ja .bad
+    je .bad_panel_send
+    call prepare_panel_message
+    test eax, eax
+    js .bad_panel_json
+    mov r13d, eax
 
     lea rdi, [discord_json]
     lea rsi, [discord_json_prefix]
     mov edx, discord_json_prefix_len
     call memory_copy
     lea rdi, [discord_json + discord_json_prefix_len]
-    mov rsi, r12
+    lea rsi, [panel_message]
     mov edx, r13d
     mov ecx, 4096 - discord_json_prefix_len - discord_json_suffix_len
     call gateway_escape_copy
     cmp eax, -1
-    je .bad
+    je .bad_panel_send
     mov r14d, eax
     lea rdi, [discord_json + discord_json_prefix_len + r14]
     lea rsi, [discord_json_suffix]
@@ -539,18 +618,277 @@ send_panel_message_to_discord:
     call memory_copy
     mov r15d, r14d
     add r15d, discord_json_prefix_len + discord_json_suffix_len
-
     mov rdi, r15
     call send_discord_json_buffer
-    jmp .out
-.bad:
+    jmp .out_panel_send
+.bad_panel_json:
+    mov eax, -2
+    jmp .out_panel_send
+.bad_panel_send:
     mov eax, -1
-.out:
+.out_panel_send:
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
+    ret
+
+; Parse {"message":"..."}, trim ASCII JSON whitespace, and validate UTF-8.
+prepare_panel_message:
+    push r12
+    push r13
+    lea rdi, [request_buffer]
+    lea rsi, [header_terminator]
+    mov ecx, header_terminator_len
+    mov rdx, [request_length]
+    call find_bytes
+    test rax, rax
+    jz .bad_prepare
+    add rax, header_terminator_len
+    mov r12, rax
+    lea rdx, [request_buffer]
+    add rdx, [request_length]
+    sub rdx, r12
+    mov r13, rdx
+    test r13, r13
+    jz .bad_prepare
+    mov rdi, r12
+    mov rsi, r13
+    lea rdx, [panel_message]
+    mov ecx, 4096
+    call extract_panel_json_message
+    cmp eax, -1
+    je .bad_prepare
+    mov rdi, panel_message
+    mov esi, eax
+    call trim_validate_utf8
+    cmp eax, -1
+    je .bad_prepare
+    mov [panel_message_length], eax
+    jmp .out_prepare
+.bad_prepare:
+    mov eax, -1
+.out_prepare:
+    pop r13
+    pop r12
+    ret
+
+; Trim Rust-style ASCII whitespace and count UTF-8 code points.
+; Extract a required JSON string field named message with optional JSON whitespace.
+; RDI=input, RSI=input length, RDX=output, RCX=capacity. EAX=length or -1.
+extract_panel_json_message:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov r15, rcx
+    lea rsi, [panel_message_name]
+    mov ecx, panel_message_name_len
+    mov rdi, r12
+    mov rdx, r13
+    call find_bytes
+    test rax, rax
+    jz .bad_panel_json
+    add rax, panel_message_name_len
+    mov r8, rax
+.skip_space:
+    cmp r8, r12
+    jb .bad_panel_json
+    mov r9, r12
+    add r9, r13
+    cmp r8, r9
+    jae .bad_panel_json
+    mov al, [r8]
+    cmp al, ' '
+    je .advance_space
+    cmp al, 9
+    je .advance_space
+    cmp al, 10
+    je .advance_space
+    cmp al, 13
+    je .advance_space
+    cmp al, ':'
+    jne .bad_panel_json
+    inc r8
+.after_colon:
+    cmp r8, r9
+    jae .bad_panel_json
+    mov al, [r8]
+    cmp al, ' '
+    je .advance_after_colon
+    cmp al, 9
+    je .advance_after_colon
+    cmp al, 10
+    je .advance_after_colon
+    cmp al, 13
+    je .advance_after_colon
+    cmp al, '"'
+    jne .bad_panel_json
+    inc r8
+    mov rdi, r8
+    sub r9, r8
+    mov rsi, r9
+    mov rdx, r14
+    mov rcx, r15
+    call gateway_decode_string
+    jmp .out_panel_json
+.advance_space:
+    inc r8
+    jmp .skip_space
+.advance_after_colon:
+    inc r8
+    jmp .after_colon
+.bad_panel_json:
+    mov eax, -1
+.out_panel_json:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+trim_validate_utf8:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rsi
+    xor r14d, r14d
+.leading_trim:
+    cmp r14, r13
+    jae .bad_trim
+    mov dil, [r12 + r14]
+    call is_ascii_space
+    test al, al
+    jz .right_trim
+    inc r14
+    jmp .leading_trim
+.right_trim:
+    mov r15, r13
+.trailing_trim:
+    cmp r15, r14
+    jbe .trimmed
+    mov dil, [r12 + r15 - 1]
+    call is_ascii_space
+    test al, al
+    jz .trimmed
+    dec r15
+    jmp .trailing_trim
+.trimmed:
+    mov r13, r15
+    sub r13, r14
+    test r13, r13
+    jz .bad_trim
+    test r14, r14
+    jz .count_utf8
+    mov rdx, r13
+    lea rdi, [r12]
+    lea rsi, [r12 + r14]
+    call memory_copy
+.count_utf8:
+    xor ecx, ecx
+    xor r8d, r8d
+.next_utf8:
+    cmp rcx, r13
+    jae .count_done
+    movzx eax, byte [r12 + rcx]
+    cmp al, 0x80
+    jb .one_utf8
+    cmp al, 0xc2
+    jb .bad_trim
+    cmp al, 0xdf
+    jbe .two_utf8
+    cmp al, 0xef
+    jbe .three_utf8
+    cmp al, 0xf4
+    ja .bad_trim
+    jmp .four_utf8
+.one_utf8:
+    inc rcx
+    inc r8
+    jmp .next_utf8
+.two_utf8:
+    lea r9, [rcx + 1]
+    cmp r9, r13
+    jae .bad_trim
+    mov al, [r12 + r9]
+    call is_utf8_continuation
+    test al, al
+    jz .bad_trim
+    add rcx, 2
+    inc r8
+    jmp .next_utf8
+.three_utf8:
+    lea r9, [rcx + 2]
+    cmp r9, r13
+    jae .bad_trim
+    mov al, [r12 + rcx + 1]
+    call is_utf8_continuation
+    test al, al
+    jz .bad_trim
+    mov al, [r12 + r9]
+    call is_utf8_continuation
+    test al, al
+    jz .bad_trim
+    add rcx, 3
+    inc r8
+    jmp .next_utf8
+.four_utf8:
+    lea r9, [rcx + 3]
+    cmp r9, r13
+    jae .bad_trim
+    mov al, [r12 + rcx + 1]
+    call is_utf8_continuation
+    test al, al
+    jz .bad_trim
+    mov al, [r12 + rcx + 2]
+    call is_utf8_continuation
+    test al, al
+    jz .bad_trim
+    mov al, [r12 + r9]
+    call is_utf8_continuation
+    test al, al
+    jz .bad_trim
+    add rcx, 4
+    inc r8
+    jmp .next_utf8
+.count_done:
+    cmp r8, 2000
+    ja .bad_trim
+    mov rax, r13
+    jmp .out_trim
+.bad_trim:
+    mov eax, -1
+.out_trim:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+is_ascii_space:
+    cmp dil, 9
+    jb .not_space
+    cmp dil, 13
+    jbe .space
+    cmp dil, 32
+    je .space
+.not_space:
+    xor eax, eax
+    ret
+.space:
+    mov eax, 1
+    ret
+
+is_utf8_continuation:
+    and eax, 0xc0
+    cmp al, 0x80
+    sete al
     ret
 
 ; Send the already serialized Discord message through verified HTTPS.
@@ -806,6 +1144,10 @@ fatal_listen:
     lea rsi, [error_listen]
     mov edx, error_listen_len
     jmp fatal
+fatal_config:
+    lea rsi, [error_config]
+    mov edx, error_config_len
+    jmp fatal
 fatal_gateway:
     lea rsi, [error_gateway]
     mov edx, error_gateway_len
@@ -854,6 +1196,9 @@ upgrade_websocket:
     push r12
     push r13
     push r14
+    call bridge_lock_acquire
+    test al, al
+    jz .conflict
     lea rdi, [request_buffer]
     lea rsi, [websocket_key_prefix]
     mov ecx, websocket_key_prefix_len
@@ -900,15 +1245,67 @@ upgrade_websocket:
     call write_all
     call websocket_loop
     jmp .out
+.conflict:
+    mov edi, dword [client_fd]
+    lea rsi, [response_conflict]
+    mov edx, response_conflict_len
+    call write_all
+    jmp .out
 .bad_request:
+    call bridge_lock_release
+    mov dword [bridge_active], 0
     mov edi, dword [client_fd]
     lea rsi, [response_bad_websocket]
     mov edx, response_bad_websocket_len
     call write_all
 .out:
+    call bridge_lock_release
     pop r14
     pop r13
     pop r12
+    ret
+
+; Acquire a cross-process bridge lock. Healthy active connections reject 409.
+bridge_lock_acquire:
+    mov eax, SYS_OPEN
+    lea rdi, [bridge_lock_path]
+    mov esi, 66
+    mov edx, 0o600
+    syscall
+    test rax, rax
+    js .reject_lock
+    mov [bridge_lock_fd], eax
+    mov eax, SYS_FLOCK
+    mov edi, [bridge_lock_fd]
+    mov esi, LOCK_EX | LOCK_NB
+    syscall
+    test rax, rax
+    js .close_reject_lock
+    mov dword [bridge_active], 1
+    mov eax, 1
+    ret
+.close_reject_lock:
+    mov eax, SYS_CLOSE
+    mov edi, [bridge_lock_fd]
+    syscall
+    mov dword [bridge_lock_fd], -1
+.reject_lock:
+    xor eax, eax
+    ret
+
+bridge_lock_release:
+    cmp dword [bridge_lock_fd], 0
+    jl .done_lock
+    mov eax, SYS_FLOCK
+    mov edi, [bridge_lock_fd]
+    mov esi, LOCK_UN
+    syscall
+    mov eax, SYS_CLOSE
+    mov edi, [bridge_lock_fd]
+    syscall
+    mov dword [bridge_lock_fd], -1
+    mov dword [bridge_active], 0
+.done_lock:
     ret
 
 ; Returns EAX: byte length up to CRLF, or zero when malformed/too long.
@@ -926,6 +1323,23 @@ line_length:
 .done:
     ret
 .bad:
+    xor eax, eax
+    ret
+
+; Claim bridge slot. Healthy active connections reject a new upgrade with 409;
+; a connection idle for the configured stale period may be replaced.
+prepare_bridge_connection:
+    cmp dword [bridge_active], 0
+    je .claim
+    mov eax, [ws_idle_seconds]
+    cmp eax, 75
+    jb .reject
+.claim:
+    mov dword [bridge_active], 1
+    xor eax, eax
+    inc eax
+    ret
+.reject:
     xor eax, eax
     ret
 
@@ -1313,6 +1727,18 @@ build_fabric_event:
     cmp eax, -1
     je .out
     mov [event_type_len], eax
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, emoji_key
+    mov ecx, emoji_key_len
+    lea r8, [event_emoji]
+    mov r9d, 256
+    call extract_json_string
+    cmp eax, -1
+    jne .emoji_ready
+    xor eax, eax
+.emoji_ready:
+    mov [event_emoji_len], eax
 
     ; Chat is plain text, matching the Rust formatter.
     lea rdi, [event_type]
@@ -1373,33 +1799,51 @@ build_fabric_event:
     call build_embed_payload
     jmp .send
 .join:
+    call extract_player
+    call build_bold_player_field
     lea rsi, [title_player_joined]
     mov edx, title_player_joined_len
-    call extract_player
-    lea rcx, [event_player]
-    mov r8d, [event_player_len]
+    lea rcx, [event_field]
+    mov r8d, [event_field_len]
     call build_embed_with_field
     jmp .send
 .leave:
+    call extract_player
+    call build_bold_player_field
     lea rsi, [title_player_left]
     mov edx, title_player_left_len
-    call extract_player
-    lea rcx, [event_player]
-    mov r8d, [event_player_len]
+    lea rcx, [event_field]
+    mov r8d, [event_field_len]
     call build_embed_with_field
     jmp .send
 .death:
+    call extract_message
     lea rsi, [title_death]
     mov edx, title_death_len
-    call extract_message
+    cmp dword [event_message_len], 0
+    jne .death_message_ready
+    lea rdi, [event_message]
+    lea rsi, [default_death]
+    mov edx, default_death_len
+    call gateway_copy
+    mov dword [event_message_len], default_death_len
+.death_message_ready:
     lea rcx, [event_message]
     mov r8d, [event_message_len]
     call build_embed_with_field
     jmp .send
 .advancement:
+    call extract_message
     lea rsi, [title_advancement]
     mov edx, title_advancement_len
-    call extract_message
+    cmp dword [event_message_len], 0
+    jne .advancement_message_ready
+    lea rdi, [event_message]
+    lea rsi, [default_advancement]
+    mov edx, default_advancement_len
+    call gateway_copy
+    mov dword [event_message_len], default_advancement_len
+.advancement_message_ready:
     lea rcx, [event_message]
     mov r8d, [event_message_len]
     call build_embed_with_field
@@ -1530,6 +1974,25 @@ build_chat_payload:
     mov [fabric_json_length], r14
     ret
 
+build_bold_player_field:
+    lea rdi, [event_field]
+    lea rsi, [bold_prefix]
+    mov edx, bold_prefix_len
+    call gateway_copy
+    mov r10d, bold_prefix_len
+    lea rdi, [event_field + r10]
+    lea rsi, [event_player]
+    mov edx, [event_player_len]
+    call gateway_copy
+    add r10d, [event_player_len]
+    lea rdi, [event_field + r10]
+    lea rsi, [bold_suffix]
+    mov edx, bold_suffix_len
+    call gateway_copy
+    add r10d, bold_suffix_len
+    mov [event_field_len], r10d
+    ret
+
 build_embed_with_field:
     push r12
     push r13
@@ -1549,6 +2012,17 @@ build_embed_with_field:
     mov edx, embed_prefix_len
     call gateway_copy
     mov r14d, embed_prefix_len
+    cmp dword [event_emoji_len], 0
+    je .no_emoji_field
+    lea rdi, [discord_json + r14]
+    lea rsi, [event_emoji]
+    mov edx, [event_emoji_len]
+    mov ecx, 4096 - embed_prefix_len
+    call gateway_escape_copy
+    add r14d, eax
+    mov byte [discord_json + r14], ' '
+    inc r14d
+.no_emoji_field:
     lea rdi, [discord_json + r14]
     mov rsi, r12
     mov edx, r13d
@@ -1582,11 +2056,24 @@ build_embed_payload:
     push r13
     mov r12, rsi
     mov r13d, edx
+    mov r10, rcx
+    mov r11d, r8d
     lea rdi, [discord_json]
     lea rsi, [embed_prefix]
     mov edx, embed_prefix_len
     call gateway_copy
     mov r14d, embed_prefix_len
+    cmp dword [event_emoji_len], 0
+    je .no_emoji_payload
+    lea rdi, [discord_json + r14]
+    lea rsi, [event_emoji]
+    mov edx, [event_emoji_len]
+    mov ecx, 4096 - embed_prefix_len
+    call gateway_escape_copy
+    add r14d, eax
+    mov byte [discord_json + r14], ' '
+    inc r14d
+.no_emoji_payload:
     lea rdi, [discord_json + r14]
     mov rsi, r12
     mov edx, r13d
@@ -1598,8 +2085,8 @@ build_embed_payload:
     call gateway_copy
     add r14d, embed_description_prefix_len
     lea rdi, [discord_json + r14]
-    mov rsi, rcx
-    mov edx, r8d
+    mov rsi, r10
+    mov edx, r11d
     mov ecx, 4096 - 256
     call gateway_escape_copy
     add r14d, eax
@@ -1759,7 +2246,14 @@ response_bad_websocket:
     db 'Connection: close',13,10,13,10
     db '{"error":"invalid websocket handshake"}',10
 response_bad_websocket_len equ $ - response_bad_websocket
+response_conflict:
+    db 'HTTP/1.1 409 Conflict',13,10
+    db 'Content-Type: application/json',13,10
+    db 'Connection: close',13,10,13,10
+    db '{"error":"bridge connection already active"}',10
+response_conflict_len equ $ - response_conflict
 
+bridge_lock_path:       db '/tmp/val0x04-bridge.lock',0
 env_port:              db 'PORT='
 env_port_len           equ $ - env_port
 env_bridge:            db 'BRIDGE_WEBSOCKET_AUTH_TOKEN='
@@ -1783,14 +2277,24 @@ fabric_message_prefix: db '"message":"'
 fabric_message_prefix_len equ $ - fabric_message_prefix
 event_type_key:        db '"type":"'
 event_type_key_len equ $ - event_type_key
+emoji_key:              db '"emoji":"'
+emoji_key_len equ $ - emoji_key
 player_key:            db '"player":"'
 player_key_len equ $ - player_key
 message_key:           db '"message":"'
 message_key_len equ $ - message_key
+panel_message_key:      db '"message":"'
+panel_message_key_len equ $ - panel_message_key
+panel_message_name:     db '"message"'
+panel_message_name_len equ $ - panel_message_name
 chat_prefix:           db '{"content":"**'
 chat_prefix_len equ $ - chat_prefix
 chat_middle:           db '**: '
 chat_middle_len equ $ - chat_middle
+bold_prefix:            db '**'
+bold_prefix_len equ $ - bold_prefix
+bold_suffix:            db '**'
+bold_suffix_len equ $ - bold_suffix
 json_close:            db '"}'
 json_close_len equ $ - json_close
 embed_prefix:          db '{"embeds":[{"title":"'
@@ -1845,6 +2349,10 @@ status_disconnect: db 'disconnect'
 status_disconnect_len equ $ - status_disconnect
 default_unknown:         db 'Unknown'
 default_unknown_len equ $ - default_unknown
+default_death:           db 'Seorang pemain telah meninggal.'
+default_death_len equ $ - default_death
+default_advancement:     db 'Sebuah advancement telah dicapai.'
+default_advancement_len equ $ - default_advancement
 authorization_prefix:  db 'Authorization: Bearer '
 authorization_prefix_len equ $ - authorization_prefix
 header_terminator:      db 13,10,13,10
@@ -1873,8 +2381,15 @@ response_panel:
     db 'Content-Type: text/html; charset=utf-8',13,10
     db 'Cache-Control: no-store',13,10
     db 'Connection: close',13,10,13,10
-    db `<!doctype html><meta charset="utf-8"><title>Val0x04/ASM</title><style>body{max-width:44rem;margin:8vh auto;background:#10131a;color:#e9eef5;font:16px system-ui;padding:2rem}input,textarea,button{width:100%;box-sizing:border-box;margin:.5rem 0;padding:.7rem;background:#181d27;color:inherit;border:1px solid #40506d}textarea{height:9rem}button{cursor:pointer;background:#4c75ff;border:0}</style><h1>Val0x04/ASM</h1><p>Panel eksperimen syscall-only.</p><input id="t" type="password" placeholder="PANEL_ACCESS_TOKEN"><textarea id="m" maxlength="2000" placeholder="Pesan untuk Discord"></textarea><button onclick="go()">Kirim</button><pre id="o"></pre><script>async function go(){let r=await fetch('/api/chat',{method:'POST',headers:{Authorization:'Bearer '+t.value},body:m.value});o.textContent=await r.text()}</script>`
+    db `<!doctype html><meta charset="utf-8"><title>Val0x04/ASM</title><style>body{max-width:44rem;margin:8vh auto;background:#10131a;color:#e9eef5;font:16px system-ui;padding:2rem}input,textarea,button{width:100%;box-sizing:border-box;margin:.5rem 0;padding:.7rem;background:#181d27;color:inherit;border:1px solid #40506d}textarea{height:9rem}button{cursor:pointer;background:#4c75ff;border:0}</style><h1>Val0x04/ASM</h1><p>Panel eksperimen syscall-only.</p><input id="t" type="password" placeholder="PANEL_ACCESS_TOKEN"><textarea id="m" maxlength="2000" placeholder="Pesan untuk Discord"></textarea><button onclick="go()">Kirim</button><pre id="o"></pre><script>async function go(){let message=m.value.trim();if(!message){o.textContent='Pesan tidak boleh kosong.';return}let r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+t.value},body:JSON.stringify({message})});o.textContent=await r.text()}</script>`
 response_panel_len equ $ - response_panel
+
+response_bad_request:
+    db 'HTTP/1.1 400 Bad Request',13,10
+    db 'Content-Type: application/json',13,10
+    db 'Connection: close',13,10,13,10
+    db '{"error":"invalid request"}',10
+response_bad_request_len equ $ - response_bad_request
 
 response_unauthorized:
     db 'HTTP/1.1 401 Unauthorized',13,10
@@ -1921,6 +2436,8 @@ error_listen:          db 'val0x04-asm: listen() failed',10
 error_listen_len equ $ - error_listen
 error_gateway:         db 'val0x04-asm: Gateway worker setup failed',10
 error_gateway_len equ $ - error_gateway
+error_config:          db 'val0x04-asm: required environment is missing or invalid',10
+error_config_len equ $ - error_config
 
 section .data
 align 8
@@ -1941,9 +2458,12 @@ gateway_pipe_read:      dd -1
 gateway_pipe_write:     dd -1
 gateway_pid:            dd -1
 bridge_active:          dd 0
+bridge_lock_fd:         dd -1
+config_invalid:         dd 0
 gateway_message_length:  dd 0
 rest_sleep_seconds:      dq 0
 event_type_len:         dd 0
+event_emoji_len:        dd 0
 event_player_len:       dd 0
 event_message_len:      dd 0
 event_field_len:        dd 0
@@ -1987,7 +2507,10 @@ rest_sleep_timespec:     resb 16
 discord_url:            resb 256
 discord_authorization:  resb 512
 discord_json:           resb 4096
+panel_message:          resb 4096
+panel_message_length:    resq 1
 event_type:             resb 32
+event_emoji:            resb 256
 event_player:           resb 512
 event_message:          resb 2048
 event_field:            resb 2048

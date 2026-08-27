@@ -61,10 +61,23 @@ def main() -> None:
         pong = recv_exact(sock, 4)
         assert pong == b"\x8a\x02ok", pong.hex()
 
-        # A Fabric-style JSON text frame must be accepted without a disconnect.
-        sock.sendall(masked_frame(0x1, b'{"type":"chat","message":"smoke"}'))
+        # Every Rust event variant must be accepted without disconnecting.
+        events = [
+            b'{"type":"chat","player":"Alex","message":"smoke"}',
+            b'{"type":"join","player":"Alex","emoji":"+"}',
+            b'{"type":"leave","player":"Alex","emoji":"-"}',
+            b'{"type":"death","message":"fell","emoji":"!"}',
+            b'{"type":"advancement","message":"Stone Age"}',
+            b'{"type":"bridge_status","status":"connect","emoji":"~"}',
+            b'{"type":"bridge_status","status":"disconnect"}',
+            b'{"type":"server_start"}',
+            b'{"type":"server_stop"}',
+            b'{"type":"unknown"}',
+        ]
+        for event in events:
+            sock.sendall(masked_frame(0x1, event))
         sock.sendall(masked_frame(0x8))
-    print("WebSocket handshake and Pong smoke test passed")
+    print("WebSocket handshake, Pong, and all event variants passed")
 
 
 if __name__ == "__main__":
