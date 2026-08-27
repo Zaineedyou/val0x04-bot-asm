@@ -120,7 +120,7 @@ long secure_gateway_send_text(const char *data, size_t len) {
 
 long secure_gateway_recv_text(char *out, size_t cap, size_t *out_len) {
     size_t received = 0;
-    const struct curl_ws_frame *meta = NULL;
+    struct curl_ws_frame *meta = NULL;
     CURLcode code;
 
     if (!gateway || !out || !out_len || cap == 0) return -EINVAL;
