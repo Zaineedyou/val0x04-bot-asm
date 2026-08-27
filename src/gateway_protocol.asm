@@ -265,7 +265,7 @@ sequence_key: db '"s":'
 sequence_key_len equ $ - sequence_key
 identify_prefix: db '{"op":2,"d":{"token":"'
 identify_prefix_len equ $ - identify_prefix
-identify_suffix: db '","intents":37377,"properties":{"os":"linux","browser":"val0x04-asm","device":"val0x04-asm"}}}'
+identify_suffix: db '","intents":33283,"properties":{"os":"linux","browser":"val0x04-asm","device":"val0x04-asm"}}}'
 identify_suffix_len equ $ - identify_suffix
 heartbeat_prefix: db '{"op":1,"d":'
 heartbeat_prefix_len equ $ - heartbeat_prefix

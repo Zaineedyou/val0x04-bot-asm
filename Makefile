@@ -3,7 +3,7 @@ CC ?= gcc
 LD ?= ld
 BUILD_DIR := build
 BINARY := $(BUILD_DIR)/val0x04-asm
-ASM_OBJECTS := $(BUILD_DIR)/main.o $(BUILD_DIR)/sha256.o $(BUILD_DIR)/tls_record.o $(BUILD_DIR)/gateway_protocol.o
+ASM_OBJECTS := $(BUILD_DIR)/main.o $(BUILD_DIR)/sha256.o $(BUILD_DIR)/tls_record.o $(BUILD_DIR)/gateway_protocol.o $(BUILD_DIR)/gateway_worker.o
 ADAPTER_OBJECTS := $(BUILD_DIR)/driver.o $(BUILD_DIR)/secure_transport.o
 OBJECTS := $(ASM_OBJECTS) $(ADAPTER_OBJECTS)
 CRYPTO_TEST := $(BUILD_DIR)/crypto-vectors
@@ -31,6 +31,9 @@ $(BUILD_DIR)/tls_record.o: src/tls_record.asm | $(BUILD_DIR)
 	$(NASM) -f elf64 -g -F dwarf $< -o $@
 
 $(BUILD_DIR)/gateway_protocol.o: src/gateway_protocol.asm | $(BUILD_DIR)
+	$(NASM) -f elf64 -g -F dwarf $< -o $@
+
+$(BUILD_DIR)/gateway_worker.o: src/gateway_worker.asm | $(BUILD_DIR)
 	$(NASM) -f elf64 -g -F dwarf $< -o $@
 
 $(BUILD_DIR)/driver.o: adapter/driver.c | $(BUILD_DIR)

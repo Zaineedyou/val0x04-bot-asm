@@ -6,6 +6,23 @@ BITS 64
 DEFAULT REL
 
 extern secure_https_post_json
+extern secure_gateway_connect
+extern secure_gateway_close
+extern secure_gateway_socket
+extern secure_gateway_send
+extern secure_gateway_recv
+extern gateway_worker
+extern gateway_escape_copy
+extern gateway_copy
+extern gateway_find_key
+extern gateway_decode_string
+
+global discord_token_ptr
+global discord_token_len
+global discord_channel_ptr
+global discord_channel_len
+global gateway_pipe_write
+global write_all
 
 %define SYS_READ            0
 %define SYS_WRITE           1
@@ -17,6 +34,20 @@ extern secure_https_post_json
 %define SYS_SETSOCKOPT      54
 %define SYS_EXIT            60
 %define SYS_GETRANDOM       318
+%define SYS_POLL            7
+%define SYS_FORK            57
+%define SYS_CLOCK_GETTIME   228
+%define SYS_PIPE            22
+%define SYS_NANOSLEEP       35
+%define SYS_PRCTL           157
+%define PR_SET_PDEATHSIG    1
+%define SIGTERM             15
+%define CLOCK_MONOTONIC     1
+%define POLLIN              1
+%define CURLWS_TEXT         1
+%define CURLWS_PING         16
+%define CURLWS_CLOSE        8
+%define CURLWS_PONG         64
 
 %define AF_INET             2
 %define SOCK_STREAM         1
@@ -38,8 +69,25 @@ asm_service_start:
     cmp eax, 32
     jne fatal_entropy
     call open_listener
+    call open_gateway_pipe
+    call spawn_gateway_worker
 
 .accept_loop:
+    call drain_gateway_messages
+    mov eax, [server_fd]
+    mov [listener_pollfds], eax
+    mov word [listener_pollfds + 4], POLLIN
+    mov word [listener_pollfds + 6], 0
+    mov eax, SYS_POLL
+    lea rdi, [listener_pollfds]
+    mov esi, 1
+    mov edx, 1000
+    syscall
+    test rax, rax
+    jle .accept_loop
+    test word [listener_pollfds + 6], POLLIN
+    jz .accept_loop
+
     mov eax, SYS_ACCEPT
     mov edi, dword [server_fd]
     xor esi, esi
@@ -55,6 +103,120 @@ asm_service_start:
     mov edi, dword [client_fd]
     syscall
     jmp .accept_loop
+
+; ---------------------------------------------------------------------------
+; Gateway worker process and parent-to-bridge message pipe.
+; ---------------------------------------------------------------------------
+open_gateway_pipe:
+    mov eax, SYS_PIPE
+    lea rdi, [gateway_pipe]
+    syscall
+    test eax, eax
+    js fatal_gateway
+    mov eax, [gateway_pipe]
+    mov [gateway_pipe_read], eax
+    mov eax, [gateway_pipe + 4]
+    mov [gateway_pipe_write], eax
+    ret
+
+spawn_gateway_worker:
+    mov eax, SYS_FORK
+    syscall
+    test rax, rax
+    js fatal_gateway
+    jz .child
+    mov [gateway_pid], eax
+    mov eax, SYS_CLOSE
+    mov edi, [gateway_pipe_write]
+    syscall
+    mov dword [gateway_pipe_write], -1
+    ret
+.child:
+    mov eax, SYS_PRCTL
+    mov edi, PR_SET_PDEATHSIG
+    mov esi, SIGTERM
+    syscall
+    mov eax, SYS_CLOSE
+    mov edi, [gateway_pipe_read]
+    syscall
+    mov eax, SYS_CLOSE
+    mov edi, [server_fd]
+    syscall
+    call gateway_worker
+    mov eax, SYS_EXIT
+    xor edi, edi
+    syscall
+
+; Drain complete JSON messages produced by the Gateway worker.
+drain_gateway_messages:
+    cmp dword [gateway_pipe_read], 0
+    jl .done
+    mov eax, [gateway_pipe_read]
+    mov [gateway_pipe_poll], eax
+    mov word [gateway_pipe_poll + 4], POLLIN
+    mov word [gateway_pipe_poll + 6], 0
+    mov eax, SYS_POLL
+    lea rdi, [gateway_pipe_poll]
+    mov esi, 1
+    xor edx, edx
+    syscall
+    test rax, rax
+    jle .done
+    test word [gateway_pipe_poll + 6], POLLIN
+    jz .done
+
+    mov r8d, [gateway_message_length]
+    cmp r8d, 65535
+    jae .drop
+    mov eax, 65535
+    sub eax, r8d
+    mov edx, eax
+    mov edi, [gateway_pipe_read]
+    lea rsi, [gateway_message_buffer + r8]
+    mov eax, SYS_READ
+    syscall
+    test rax, rax
+    jle .done
+    add r8, rax
+    mov [gateway_message_length], r8d
+    cmp dword [bridge_active], 0
+    je .drop
+
+.next_line:
+    xor ecx, ecx
+.find_line:
+    cmp rcx, r8
+    jae .done
+    cmp byte [gateway_message_buffer + rcx], 10
+    je .line_found
+    inc rcx
+    jmp .find_line
+.line_found:
+    test ecx, ecx
+    jz .remove_line
+    lea rdi, [gateway_message_buffer]
+    mov esi, ecx
+    mov edx, 1
+    call websocket_send_frame
+.remove_line:
+    mov r9, r8
+    sub r9, rcx
+    dec r9
+    jz .clear
+    lea rdi, [gateway_message_buffer]
+    lea rsi, [gateway_message_buffer + rcx + 1]
+    mov rdx, r9
+    call memory_copy
+    mov r8, r9
+    mov [gateway_message_length], r8d
+    jmp .next_line
+.clear:
+    mov dword [gateway_message_length], 0
+    jmp .done
+.drop:
+    mov dword [gateway_message_length], 0
+.done:
+    ret
 
 ; ---------------------------------------------------------------------------
 ; Environment configuration.
@@ -326,9 +488,8 @@ handle_http_request:
 .done:
     ret
 
-; Send a raw panel request body as a JSON `content` value through the secure
-; transport ABI. The small parser rejects control characters, quotes and
-; backslashes rather than attempting unsafe escaping in a fixed-size buffer.
+; Serialize the request body as a Discord JSON content value. NASM owns the
+; application serialization; the C adapter only performs verified HTTPS.
 ; EAX = 0 only when Discord returns an HTTP 2xx status.
 send_panel_message_to_discord:
     push rbx
@@ -349,45 +510,64 @@ send_panel_message_to_discord:
     test rax, rax
     jz .bad
     add rax, header_terminator_len
-    mov r12, rax                      ; panel message source
+    mov r12, rax
     lea rdx, [request_buffer]
     add rdx, [request_length]
     sub rdx, r12
-    mov r13, rdx                      ; panel message length
+    mov r13, rdx
     test r13, r13
     jz .bad
     cmp r13, 2000
     ja .bad
 
-    ; JSON content: {"content":"<raw message>"}.
     lea rdi, [discord_json]
     lea rsi, [discord_json_prefix]
     mov edx, discord_json_prefix_len
     call memory_copy
-    lea r14, [discord_json + discord_json_prefix_len]
-    xor rbx, rbx
-.copy_message:
-    cmp rbx, r13
-    jae .message_done
-    mov al, [r12 + rbx]
-    cmp al, 0x20
-    jb .bad
-    cmp al, '"'
+    lea rdi, [discord_json + discord_json_prefix_len]
+    mov rsi, r12
+    mov edx, r13d
+    mov ecx, 4096 - discord_json_prefix_len - discord_json_suffix_len
+    call gateway_escape_copy
+    cmp eax, -1
     je .bad
-    cmp al, 0x5c
-    je .bad
-    mov [r14 + rbx], al
-    inc rbx
-    jmp .copy_message
-.message_done:
-    lea rdi, [r14 + r13]
+    mov r14d, eax
+    lea rdi, [discord_json + discord_json_prefix_len + r14]
     lea rsi, [discord_json_suffix]
     mov edx, discord_json_suffix_len
     call memory_copy
-    mov r15, r13
-    add r15, discord_json_prefix_len + discord_json_suffix_len
+    mov r15d, r14d
+    add r15d, discord_json_prefix_len + discord_json_suffix_len
 
-    ; Authorization: Bot <DISCORD_TOKEN>.
+    mov rdi, r15
+    call send_discord_json_buffer
+    jmp .out
+.bad:
+    mov eax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; Send the already serialized Discord message through verified HTTPS.
+; RDI contains the JSON byte length; EAX is zero only for HTTP 2xx.
+send_discord_json_buffer:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r15, rdi
+    cmp r15, 4096
+    ja .bad
+    cmp dword [discord_token_len], 0
+    je .bad
+    cmp dword [discord_channel_len], 0
+    je .bad
+
     lea rdi, [discord_authorization]
     lea rsi, [discord_authorization_prefix]
     mov edx, discord_authorization_prefix_len
@@ -398,7 +578,6 @@ send_panel_message_to_discord:
     call memory_copy
     mov byte [discord_authorization + discord_authorization_prefix_len + rdx], 0
 
-    ; https://discord.com/api/v10/channels/<channel>/messages
     lea rdi, [discord_url]
     lea rsi, [discord_url_prefix]
     mov edx, discord_url_prefix_len
@@ -601,6 +780,10 @@ fatal_bind:
 fatal_listen:
     lea rsi, [error_listen]
     mov edx, error_listen_len
+    jmp fatal
+fatal_gateway:
+    lea rsi, [error_gateway]
+    mov edx, error_gateway_len
 fatal:
     mov edi, 2
     call write_all
@@ -958,9 +1141,11 @@ base64_sha1:
 ; Poll every five seconds. Ping on every 20 seconds of inactivity and close
 ; after 75 seconds without a received frame, matching the source bridge policy.
 websocket_loop:
+    mov dword [bridge_active], 1
     mov dword [ws_idle_seconds], 0
     mov dword [ws_next_ping], 20
 .loop:
+    call drain_gateway_messages
     mov eax, dword [client_fd]
     mov [poll_descriptor], eax
     mov word [poll_descriptor + 4], 1
@@ -968,7 +1153,7 @@ websocket_loop:
     mov eax, 7                             ; poll(2)
     lea rdi, [poll_descriptor]
     mov esi, 1
-    mov edx, 5000
+    mov edx, 1000
     syscall
     test rax, rax
     js .done
@@ -980,7 +1165,7 @@ websocket_loop:
     mov dword [ws_next_ping], 20
     jmp .loop
 .timeout:
-    add dword [ws_idle_seconds], 5
+    add dword [ws_idle_seconds], 1
     mov eax, [ws_idle_seconds]
     cmp eax, 75
     jae .done
@@ -992,7 +1177,8 @@ websocket_loop:
     mov edx, 9                             ; Ping
     call websocket_send_frame
     jmp .loop
-.done:
+    .done:
+    mov dword [bridge_active], 0
     ret
 
 ; EAX=0 on success; negative on close/protocol/read error.
@@ -1069,50 +1255,336 @@ websocket_receive_frame:
     mov eax, -1
     ret
 
-; Extract a narrow Fabric chat payload: {"message":"..."}. This app logic
-; belongs to NASM; the C boundary only transmits the final HTTPS request.
+; Parse and format the Fabric event contract in NASM. The C adapter never
+; decides event types or message content.
 forward_fabric_chat_to_discord:
     push r12
     push r13
-    lea rdi, [ws_payload]
-    lea rsi, [fabric_message_prefix]
-    mov ecx, fabric_message_prefix_len
-    mov edx, [ws_payload_length]
-    call find_bytes
-    test rax, rax
-    jz .out
-    add rax, fabric_message_prefix_len
-    mov r12, rax
-    xor r13, r13
-.scan:
-    cmp r13, 2000
-    jae .out
-    mov al, [r12 + r13]
-    test al, al
-    jz .out
-    cmp al, '"'
-    je .message_found
-    inc r13
-    jmp .scan
-.message_found:
-    test r13, r13
-    jz .out
-    ; Reuse the NASM REST builder with a synthetic header/body boundary.
-    lea rdi, [request_buffer]
-    lea rsi, [header_terminator]
-    mov edx, header_terminator_len
-    call memory_copy
-    lea rdi, [request_buffer + header_terminator_len]
-    mov rsi, r12
-    mov rdx, r13
-    call memory_copy
-    mov rax, r13
-    add rax, header_terminator_len
-    mov [request_length], rax
-    call send_panel_message_to_discord
+    mov r12, ws_payload
+    mov r13, [ws_payload_length]
+    mov rdi, r12
+    mov rsi, r13
+    call build_fabric_event
 .out:
     pop r13
     pop r12
+    ret
+
+build_fabric_event:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rsi
+
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, event_type_key
+    mov ecx, event_type_key_len
+    lea r8, [event_type]
+    mov r9d, 32
+    call extract_json_string
+    cmp eax, -1
+    je .out
+    mov [event_type_len], eax
+
+    ; Chat is plain text, matching the Rust formatter.
+    lea rdi, [event_type]
+    lea rsi, [event_chat]
+    mov ecx, event_chat_len
+    call memory_equal
+    test al, al
+    jz .not_chat
+    call build_chat_payload
+    jmp .send
+.not_chat:
+    lea rdi, [event_type]
+    lea rsi, [event_join]
+    mov ecx, event_join_len
+    call memory_equal
+    test al, al
+    jnz .join
+    lea rdi, [event_type]
+    lea rsi, [event_leave]
+    mov ecx, event_leave_len
+    call memory_equal
+    test al, al
+    jnz .leave
+    lea rdi, [event_type]
+    lea rsi, [event_death]
+    mov ecx, event_death_len
+    call memory_equal
+    test al, al
+    jnz .death
+    lea rdi, [event_type]
+    lea rsi, [event_advancement]
+    mov ecx, event_advancement_len
+    call memory_equal
+    test al, al
+    jnz .advancement
+    lea rdi, [event_type]
+    lea rsi, [event_bridge_status]
+    mov ecx, event_bridge_status_len
+    call memory_equal
+    test al, al
+    jnz .bridge_status
+    lea rdi, [event_type]
+    lea rsi, [event_server_start]
+    mov ecx, event_server_start_len
+    call memory_equal
+    test al, al
+    jnz .server_start
+    lea rdi, [event_type]
+    lea rsi, [event_server_stop]
+    mov ecx, event_server_stop_len
+    call memory_equal
+    test al, al
+    jz .out
+    lea rsi, [title_server_status]
+    mov edx, title_server_status_len
+    lea rcx, [description_server_stop]
+    mov r8d, description_server_stop_len
+    call build_embed_payload
+    jmp .send
+.join:
+    lea rsi, [title_player_joined]
+    mov edx, title_player_joined_len
+    lea rcx, [event_player]
+    mov r8d, 512
+    call build_embed_with_field
+    jmp .send
+.leave:
+    lea rsi, [title_player_left]
+    mov edx, title_player_left_len
+    lea rcx, [event_player]
+    mov r8d, 512
+    call build_embed_with_field
+    jmp .send
+.death:
+    lea rsi, [title_death]
+    mov edx, title_death_len
+    lea rcx, [event_message]
+    mov r8d, 2048
+    call build_embed_with_field
+    jmp .send
+.advancement:
+    lea rsi, [title_advancement]
+    mov edx, title_advancement_len
+    lea rcx, [event_message]
+    mov r8d, 2048
+    call build_embed_with_field
+    jmp .send
+.bridge_status:
+    lea rsi, [title_bridge_status]
+    mov edx, title_bridge_status_len
+    lea rcx, [description_bridge_status]
+    mov r8d, description_bridge_status_len
+    call build_embed_payload
+    jmp .send
+.server_start:
+    lea rsi, [title_server_status]
+    mov edx, title_server_status_len
+    lea rcx, [description_server_start]
+    mov r8d, description_server_start_len
+    call build_embed_payload
+.send:
+    lea rdi, [discord_json]
+    mov rsi, [fabric_json_length]
+    call send_discord_json_buffer
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+extract_json_string:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rsi
+    mov r14, rdx
+    mov r15, rcx
+    mov r10, r8
+    mov r11d, r9d
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, r14
+    mov rcx, r15
+    call gateway_find_key
+    test rax, rax
+    jz .bad
+    add rax, r15
+    mov rdi, rax
+    mov rsi, r13
+    sub rsi, rax
+    add rsi, r12
+    mov rdx, r10
+    mov rcx, r11
+    call gateway_decode_string
+    jmp .out
+.bad:
+    mov eax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+build_chat_payload:
+    lea rdi, [event_player]
+    mov rdx, 512
+    call extract_player
+    lea rdi, [event_message]
+    mov rdx, 2048
+    call extract_message
+    lea rdi, [discord_json]
+    lea rsi, [chat_prefix]
+    mov edx, chat_prefix_len
+    call gateway_copy
+    mov r14d, chat_prefix_len
+    lea rdi, [discord_json + r14]
+    lea rsi, [event_player]
+    mov edx, [event_player_len]
+    mov ecx, 4096 - chat_prefix_len
+    call gateway_escape_copy
+    add r14d, eax
+    lea rdi, [discord_json + r14]
+    lea rsi, [chat_middle]
+    mov edx, chat_middle_len
+    call gateway_copy
+    add r14d, chat_middle_len
+    lea rdi, [discord_json + r14]
+    lea rsi, [event_message]
+    mov edx, [event_message_len]
+    mov ecx, 4096 - chat_prefix_len - chat_middle_len
+    call gateway_escape_copy
+    add r14d, eax
+    lea rdi, [discord_json + r14]
+    lea rsi, [json_close]
+    mov edx, json_close_len
+    call gateway_copy
+    add r14d, json_close_len
+    mov [fabric_json_length], r14
+    ret
+
+build_embed_with_field:
+    push r12
+    push r13
+    push r14
+    mov r12, rsi
+    mov r13d, edx
+    mov r14, rcx
+    mov [event_field_capacity], r8d
+    mov rdi, r14
+    mov rdx, [event_field_capacity]
+    call extract_event_field
+    lea rdi, [discord_json]
+    lea rsi, [embed_prefix]
+    mov edx, embed_prefix_len
+    call gateway_copy
+    mov r14d, embed_prefix_len
+    lea rdi, [discord_json + r14]
+    mov rsi, r12
+    mov edx, r13d
+    call gateway_copy
+    add r14d, r13d
+    lea rdi, [discord_json + r14]
+    lea rsi, [embed_description_prefix]
+    mov edx, embed_description_prefix_len
+    call gateway_copy
+    add r14d, embed_description_prefix_len
+    lea rdi, [discord_json + r14]
+    lea rsi, [event_field]
+    mov edx, [event_field_len]
+    mov ecx, 4096 - 256
+    call gateway_escape_copy
+    add r14d, eax
+    lea rdi, [discord_json + r14]
+    lea rsi, [json_embed_close]
+    mov edx, json_embed_close_len
+    call gateway_copy
+    add r14d, json_embed_close_len
+    mov [fabric_json_length], r14
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+build_embed_payload:
+    push r12
+    push r13
+    mov r12, rsi
+    mov r13d, edx
+    lea rdi, [discord_json]
+    lea rsi, [embed_prefix]
+    mov edx, embed_prefix_len
+    call gateway_copy
+    mov r14d, embed_prefix_len
+    lea rdi, [discord_json + r14]
+    mov rsi, r12
+    mov edx, r13d
+    call gateway_copy
+    add r14d, r13d
+    lea rdi, [discord_json + r14]
+    lea rsi, [embed_description_prefix]
+    mov edx, embed_description_prefix_len
+    call gateway_copy
+    add r14d, embed_description_prefix_len
+    lea rdi, [discord_json + r14]
+    mov rsi, rcx
+    mov edx, r8d
+    mov ecx, 4096 - 256
+    call gateway_escape_copy
+    add r14d, eax
+    lea rdi, [discord_json + r14]
+    lea rsi, [json_embed_close]
+    mov edx, json_embed_close_len
+    call gateway_copy
+    add r14d, json_embed_close_len
+    mov [fabric_json_length], r14
+    pop r13
+    pop r12
+    ret
+
+extract_player:
+    push rdi
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, player_key
+    mov ecx, player_key_len
+    lea r8, [event_player]
+    mov r9d, 512
+    call extract_json_string
+    mov [event_player_len], eax
+    pop rdi
+    ret
+extract_message:
+    push rdi
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, message_key
+    mov ecx, message_key_len
+    lea r8, [event_message]
+    mov r9d, 2048
+    call extract_json_string
+    mov [event_message_len], eax
+    pop rdi
+    ret
+extract_event_field:
+    ; RCX points to destination and RDX is its capacity.
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, message_key
+    mov ecx, message_key_len
+    lea r8, [event_field]
+    mov r9d, 2048
+    call extract_json_string
+    mov [event_field_len], eax
     ret
 
 ; rdi=buffer, esi=count; reads all bytes from the active bridge socket.
@@ -1219,6 +1691,58 @@ method_root:           db 'GET / '
 method_root_len        equ $ - method_root
 fabric_message_prefix: db '"message":"'
 fabric_message_prefix_len equ $ - fabric_message_prefix
+event_type_key:        db '"type":"'
+event_type_key_len equ $ - event_type_key
+player_key:            db '"player":"'
+player_key_len equ $ - player_key
+message_key:           db '"message":"'
+message_key_len equ $ - message_key
+chat_prefix:           db '{"content":"**'
+chat_prefix_len equ $ - chat_prefix
+chat_middle:           db '**: '
+chat_middle_len equ $ - chat_middle
+json_close:            db '"}'
+json_close_len equ $ - json_close
+embed_prefix:          db '{"embeds":[{"title":"'
+embed_prefix_len equ $ - embed_prefix
+embed_description_prefix: db '","description":"'
+embed_description_prefix_len equ $ - embed_description_prefix
+json_embed_close:      db '"}]}'
+json_embed_close_len equ $ - json_embed_close
+event_chat:            db 'chat'
+event_chat_len equ $ - event_chat
+event_join:            db 'join'
+event_join_len equ $ - event_join
+event_leave:           db 'leave'
+event_leave_len equ $ - event_leave
+event_death:           db 'death'
+event_death_len equ $ - event_death
+event_advancement:     db 'advancement'
+event_advancement_len equ $ - event_advancement
+event_bridge_status:   db 'bridge_status'
+event_bridge_status_len equ $ - event_bridge_status
+event_server_start:    db 'server_start'
+event_server_start_len equ $ - event_server_start
+event_server_stop:     db 'server_stop'
+event_server_stop_len equ $ - event_server_stop
+title_player_joined:   db 'Player Joined'
+title_player_joined_len equ $ - title_player_joined
+title_player_left:     db 'Player Left'
+title_player_left_len equ $ - title_player_left
+title_death:           db 'Death'
+title_death_len equ $ - title_death
+title_advancement:     db 'Advancement'
+title_advancement_len equ $ - title_advancement
+title_bridge_status:   db 'Bridge Status'
+title_bridge_status_len equ $ - title_bridge_status
+title_server_status:   db 'Server Status'
+title_server_status_len equ $ - title_server_status
+description_server_start: db 'Server telah menyala.'
+description_server_start_len equ $ - description_server_start
+description_server_stop: db 'Server sedang dimatikan.'
+description_server_stop_len equ $ - description_server_stop
+description_bridge_status: db 'Status bridge berubah.'
+description_bridge_status_len equ $ - description_bridge_status
 authorization_prefix:  db 'Authorization: Bearer '
 authorization_prefix_len equ $ - authorization_prefix
 header_terminator:      db 13,10,13,10
@@ -1292,7 +1816,9 @@ error_socket_len       equ $ - error_socket
 error_bind:            db 'val0x04-asm: bind() failed (check PORT)',10
 error_bind_len         equ $ - error_bind
 error_listen:          db 'val0x04-asm: listen() failed',10
-error_listen_len       equ $ - error_listen
+error_listen_len equ $ - error_listen
+error_gateway:         db 'val0x04-asm: Gateway worker setup failed',10
+error_gateway_len equ $ - error_gateway
 
 section .data
 align 8
@@ -1309,10 +1835,24 @@ discord_channel_ptr:    dq 0
 discord_channel_len:    dd 0
 discord_http_status:    dq 0
 bridge_events_received: dq 0
+gateway_pipe_read:      dd -1
+gateway_pipe_write:     dd -1
+gateway_pid:            dd -1
+bridge_active:          dd 0
+gateway_message_length:  dd 0
+event_type_len:         dd 0
+event_player_len:       dd 0
+event_message_len:      dd 0
+event_field_len:        dd 0
+event_field_capacity:   dd 0
+fabric_json_length:     dq 0
 ws_payload_length:      dd 0
 ws_idle_seconds:        dd 0
 ws_next_ping:           dd 20
 poll_descriptor:        dq 0
+listener_pollfds:       dq 0, 0
+gateway_pipe_poll:       dq 0
+gateway_pipe:            dd 0, 0
 sha_h0:                 dd 0
 sha_h1:                 dd 0
 sha_h2:                 dd 0
@@ -1339,6 +1879,11 @@ ws_extended_length:     resb 2
 ws_mask:                resb 4
 ws_payload:             resb 4096
 ws_out_header:          resb 2
+gateway_message_buffer:  resb 65536
 discord_url:            resb 256
 discord_authorization:  resb 512
 discord_json:           resb 4096
+event_type:             resb 32
+event_player:           resb 512
+event_message:          resb 2048
+event_field:            resb 2048

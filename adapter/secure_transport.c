@@ -98,33 +98,43 @@ int secure_gateway_connect(const char *wss_url) {
     return 0;
 }
 
-long secure_gateway_send_text(const char *data, size_t len) {
+long secure_gateway_send(const char *data, size_t len, unsigned int flags) {
     size_t offset = 0;
 
     if (!gateway || (!data && len)) return -EINVAL;
-    while (offset < len) {
+    while (offset < len || (len == 0 && offset == 0)) {
         size_t sent = 0;
-        CURLcode code = curl_ws_send(gateway, data + offset, len - offset,
-                                     &sent, 0, CURLWS_TEXT);
+        const char *source = data ? data + offset : "";
+        CURLcode code = curl_ws_send(gateway, source, len - offset,
+                                     &sent, 0, flags);
         if (code == CURLE_AGAIN) return -EAGAIN;
         if (code != CURLE_OK) {
             if (!last_error[0])
                 strncpy(last_error, curl_easy_strerror(code), sizeof(last_error) - 1);
             return -(long)code;
         }
-        if (sent == 0) return -EIO;
+        if (sent == 0 && len != 0) return -EIO;
         offset += sent;
+        if (len == 0) break;
     }
     return (long)offset;
 }
 
-long secure_gateway_recv_text(char *out, size_t cap, size_t *out_len) {
+long secure_gateway_send_text(const char *data, size_t len) {
+    return secure_gateway_send(data, len, CURLWS_TEXT);
+}
+
+long secure_gateway_recv(char *out, size_t cap, size_t *out_len,
+                         unsigned int *out_flags, size_t *out_bytes_left) {
     size_t received = 0;
-    struct curl_ws_frame *meta = NULL;
+    const struct curl_ws_frame *meta = NULL;
     CURLcode code;
 
-    if (!gateway || !out || !out_len || cap == 0) return -EINVAL;
+    if (!gateway || !out || !out_len || !out_flags || !out_bytes_left || cap == 0)
+        return -EINVAL;
     *out_len = 0;
+    *out_flags = 0;
+    *out_bytes_left = 0;
     code = curl_ws_recv(gateway, out, cap, &received, &meta);
     if (code == CURLE_AGAIN) return -EAGAIN;
     if (code != CURLE_OK) {
@@ -132,10 +142,21 @@ long secure_gateway_recv_text(char *out, size_t cap, size_t *out_len) {
             strncpy(last_error, curl_easy_strerror(code), sizeof(last_error) - 1);
         return -(long)code;
     }
-    if (!meta || meta->bytesleft != 0 || received == cap) return -EMSGSIZE;
-    if (!(meta->flags & CURLWS_TEXT)) return -EPROTO;
+    if (!meta) return -EPROTO;
     *out_len = received;
+    *out_flags = meta->flags;
+    *out_bytes_left = (size_t)meta->bytesleft;
     return (long)received;
+}
+
+long secure_gateway_recv_text(char *out, size_t cap, size_t *out_len) {
+    unsigned int flags = 0;
+    size_t bytes_left = 0;
+    long result = secure_gateway_recv(out, cap, out_len, &flags, &bytes_left);
+    if (result < 0) return result;
+    if (bytes_left != 0 || *out_len == cap) return -EMSGSIZE;
+    if (!(flags & CURLWS_TEXT)) return -EPROTO;
+    return result;
 }
 
 static size_t discard_response(char *ptr, size_t size, size_t nmemb, void *userdata) {

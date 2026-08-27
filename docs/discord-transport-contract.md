@@ -2,22 +2,22 @@
 
 ## Status implementasi
 
-Binary saat ini adalah **milestone inbound bridge**. Ia menjalankan HTTP/WebSocket Fabric dengan assembly x86-64 dan syscall Linux langsung. Koneksi keluar ke Discord secara sengaja belum diaktifkan. `DISCORD_TOKEN` boleh tetap didefinisikan untuk kompatibilitas konfigurasi, tetapi binary tidak mengirimkan nilainya ke jaringan.
+Binary saat ini menjalankan bridge HTTP/WebSocket Fabric dan worker Discord Gateway dua arah. Logika aplikasi tetap berada di NASM; koneksi TLS, DNS, HTTPS, dan WSS ditangani oleh adapter libcurl dengan verifikasi sertifikat dan hostname yang selalu aktif.
 
-> Tidak ada mode fallback yang mengirim token bot melalui koneksi TLS tanpa validasi sertifikat. `POST /api/chat` dengan token panel yang benar akan mengembalikan `501 Not Implemented` sampai transport ini memenuhi kontrak berikut.
+> Token bot hanya dikirim melalui koneksi TLS yang memvalidasi sertifikat dan hostname. `POST /api/chat` meneruskan pesan melalui REST HTTPS, sedangkan worker Gateway mempertahankan koneksi WSS untuk menerima pesan Discord.
 
 ## Persyaratan sebelum Discord diaktifkan
 
 | Komponen | Persyaratan minimum | Status |
 |---|---|---|
-| Resolusi nama | Resolver DNS yang membatasi jawaban dan menangani timeout | Belum diimplementasikan |
-| Entropi | CSPRNG dari `getrandom(2)`; tidak memakai timestamp atau PRNG sederhana | Belum diimplementasikan |
-| TLS | TLS 1.2 atau lebih baru, negosiasi cipher yang aman, pemeriksaan batas record | Belum diimplementasikan |
-| Identitas server | Verifikasi hostname, masa berlaku sertifikat, rantai X.509, dan tanda tangan sampai trust anchor | Belum diimplementasikan |
-| HTTP Discord | Header `Authorization: Bot …`, `User-Agent` sah, JSON tervalidasi, timeout, dan pembacaan respons berbatas | Belum diimplementasikan |
-| Rate limit REST | Menghormati status `429`, `retry_after`, serta limit rute | Belum diimplementasikan |
-| Gateway v10 | WSS, `Hello`, jitter heartbeat, `Identify`, ACK, `READY`, reconnect dan resume | Belum diimplementasikan |
-| Pesan Discord | Filter channel, abaikan pesan bot, parsing JSON dengan escape Unicode yang benar, role tertinggi | Belum diimplementasikan |
+| Resolusi nama | DNS dan timeout melalui libcurl | Ditangani library |
+| Entropi | CSPRNG dari `getrandom(2)`; tidak memakai timestamp atau PRNG sederhana | Aktif untuk runtime lokal |
+| TLS | Negosiasi TLS dan pemeriksaan record melalui libcurl/TLS backend | Ditangani library |
+| Identitas server | Verifikasi hostname dan rantai sertifikat melalui libcurl/TLS backend | Ditangani library |
+| HTTP Discord | Header bot, JSON terbatas, timeout, dan status HTTP | Aktif |
+| Rate limit REST | Penanganan retry berbasis `429` | Tahap berikutnya |
+| Gateway v10 | WSS, `Hello`, jitter heartbeat, `Identify`, ACK, `READY`, dan reconnect | Aktif; resume belum digunakan |
+| Pesan Discord | Filter channel, abaikan pesan bot, parsing string JSON, dan forwarding chat | Aktif; role tertinggi belum diteruskan |
 
 ## Protokol target
 

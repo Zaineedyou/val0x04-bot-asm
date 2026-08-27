@@ -95,7 +95,7 @@ null_sequence: db '{"op":10,"s":null}'
 null_sequence_len equ $ - null_sequence
 token: db 'abc.def'
 token_len equ $ - token
-identify_expected: db '{"op":2,"d":{"token":"abc.def","intents":37377,"properties":{"os":"linux","browser":"val0x04-asm","device":"val0x04-asm"}}}'
+identify_expected: db '{"op":2,"d":{"token":"abc.def","intents":33283,"properties":{"os":"linux","browser":"val0x04-asm","device":"val0x04-asm"}}}'
 identify_expected_len equ $ - identify_expected
 heartbeat_expected: db '{"op":1,"d":42}'
 heartbeat_expected_len equ $ - heartbeat_expected

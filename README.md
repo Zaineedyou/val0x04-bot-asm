@@ -4,11 +4,11 @@ Eksperimen bridge **Minecraft Fabric ↔ Discord** untuk Linux x86-64 dan Railwa
 
 | Source runtime | Peran | Target komposisi |
 |---|---|---:|
-| `src/*.asm` | HTTP, panel, autentikasi, WebSocket Fabric, liveness, JSON sempit, Discord state/payload | **75–90%** |
-| `adapter/*.c` | ABI libcurl: TLS tervalidasi, HTTPS REST, WSS frame I/O | **10–25%** |
+| `src/*.asm` | HTTP, panel, autentikasi, WebSocket Fabric, liveness, JSON, Gateway Discord, dan keputusan aplikasi | **75–90%** |
+| `adapter/*.c` | Bootstrap dan ABI libcurl: TLS tervalidasi, HTTPS REST, DNS, dan WSS frame I/O | **10–25%** |
 | libcurl + TLS backend | Hanya transport aman dan verifikasi sertifikat | Bukan logika aplikasi |
 
-`make source-ratio` memverifikasi komposisi source saat build. Checkpoint saat ini menghasilkan sekitar **89% NASM** dan **11% C adapter**.
+`make source-ratio` memverifikasi komposisi source saat build. Checkpoint saat ini menghasilkan sekitar **92,8% NASM** dan **7,2% C adapter**.
 
 ## Batas library
 
@@ -18,9 +18,9 @@ Eksperimen bridge **Minecraft Fabric ↔ Discord** untuk Linux x86-64 dan Railwa
 |---|---|
 | Listener HTTP, `/health`, `/panel`, `/api/chat` | NASM + syscall Linux |
 | Validasi token panel/bridge | NASM |
-| WebSocket Fabric, handshake SHA-1/Base64, Ping/Pong, timeout | NASM |
+| WebSocket Fabric, handshake SHA-1/Base64, Ping/Pong, timeout, dan forwarding pesan | NASM |
 | Entropi, SHA-256, HMAC, HKDF, parser record TLS | NASM |
-| JSON payload panel dan keputusan status HTTP | NASM |
+| JSON payload panel/Gateway dan keputusan status HTTP | NASM |
 | TLS, CA, hostname verification, HTTPS/WSS byte transport | C adapter + libcurl |
 
 Adapter selalu mengaktifkan certificate dan hostname verification; tidak ada opsi deploy yang mematikannya. Rincian ABI ada di [`docs/secure-transport-abi.md`](docs/secure-transport-abi.md).
@@ -30,9 +30,10 @@ Adapter selalu mengaktifkan certificate dan hostname verification; tidak ada ops
 | Jalur | Status |
 |---|---|
 | HTTP/panel/WebSocket Fabric | Berjalan dan diuji lokal |
-| Panel → Discord REST HTTPS | Dibangun oleh NASM, dikirim melalui adapter TLS libcurl; tanpa token nyata endpoint mengembalikan kegagalan aman `502` |
-| Fabric event → Discord REST | Sedang dipindahkan ke formatter NASM |
-| Discord Gateway → Fabric | Sedang dipindahkan ke state machine NASM di atas transport WSS adapter |
+| Panel → Discord REST HTTPS | Dibangun oleh NASM dan dikirim melalui adapter TLS libcurl |
+| Fabric chat → Discord REST | Berjalan melalui formatter JSON NASM |
+| Discord Gateway → Fabric | Worker Gateway NASM terpisah; Identify, heartbeat, ACK, reconnect, filter channel/bot, dan forwarding chat aktif |
+| Resume Gateway | Belum digunakan; reconnect melakukan Identify ulang pada sesi baru |
 | Container Railway | Membangun NASM + C/libcurl langsung, tanpa Rust |
 
 ## Build dan test lokal
@@ -45,7 +46,7 @@ make source-ratio
 ./tests/run-local.sh
 ```
 
-Rangkaian test memverifikasi binary berjalan, adapter libcurl terhubung, proporsi NASM minimal 75%, endpoint HTTP, autentikasi, WebSocket Ping/Pong, SHA-256, HMAC-SHA256, HKDF, serta parser record TLS.
+Rangkaian test memverifikasi binary berjalan, adapter libcurl terhubung, proporsi NASM minimal 75%, endpoint HTTP, autentikasi, WebSocket Ping/Pong, SHA-256, HMAC-SHA256, HKDF, parser record TLS, serta payload Identify dan heartbeat Gateway.
 
 ## Railway
 
