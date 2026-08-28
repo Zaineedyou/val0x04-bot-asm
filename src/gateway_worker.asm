@@ -90,6 +90,9 @@ gateway_connect_loop:
     lea rdi, [log_gateway_identify_ok]
     mov esi, log_gateway_identify_ok_len
     call log_static
+    call gateway_wait_ready
+    test eax, eax
+    js .close_retry
     jmp .session
 .resumed:
     lea rdi, [log_gateway_resume_ok]
@@ -175,6 +178,44 @@ gateway_identify:
     call log_gateway_transport_failure
     lea rdi, [log_gateway_identify_failed]
     mov esi, log_gateway_identify_failed_len
+    call log_static
+    mov eax, -1
+    ret
+
+; Wait for Discord READY after Identify. Sending Identify only proves that
+; curl accepted the frame; READY is the server acknowledgement that the bot
+; session is actually established.
+gateway_wait_ready:
+    call gateway_now_ms
+    add rax, 15000
+    mov [gateway_ready_deadline_ms], rax
+.wait:
+    call gateway_poll_readable
+    test eax, eax
+    js .bad
+    jnz .readable
+    call gateway_now_ms
+    cmp rax, [gateway_ready_deadline_ms]
+    jb .wait
+    jmp .bad
+.readable:
+    call gateway_receive_packet
+    test eax, eax
+    js .bad
+    cmp qword [gateway_packet_len], 0
+    je .wait
+    call gateway_dispatch_packet
+    test eax, eax
+    js .bad
+    cmp dword [gateway_session_valid], 1
+    je .ok
+    jmp .wait
+.ok:
+    xor eax, eax
+    ret
+.bad:
+    lea rdi, [log_gateway_ready_timeout]
+    mov esi, log_gateway_ready_timeout_len
     call log_static
     mov eax, -1
     ret
@@ -1358,6 +1399,8 @@ log_gateway_ready_ok: db 'val0x04-asm: Gateway READY diterima',10
 log_gateway_ready_ok_len equ $ - log_gateway_ready_ok
 log_gateway_hello_failed: db 'val0x04-asm: Gateway Hello gagal',10
 log_gateway_hello_failed_len equ $ - log_gateway_hello_failed
+log_gateway_ready_timeout: db 'val0x04-asm: Gateway READY tidak diterima setelah Identify',10
+log_gateway_ready_timeout_len equ $ - log_gateway_ready_timeout
 log_gateway_identify_failed: db 'val0x04-asm: Gateway Identify gagal',10
 log_gateway_identify_failed_len equ $ - log_gateway_identify_failed
 log_gateway_resume_failed: db 'val0x04-asm: Gateway Resume gagal',10
@@ -1390,6 +1433,7 @@ align 8
 heartbeat_interval_ms: dq 45000
 heartbeat_due_ms: dq 0
 gateway_hello_deadline_ms: dq 0
+gateway_ready_deadline_ms: dq 0
 gateway_connect_url: dq gateway_url
 gateway_session_valid: dd 0
 gateway_session_id_len: dd 0
