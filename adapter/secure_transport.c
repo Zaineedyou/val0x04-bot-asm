@@ -254,6 +254,7 @@ long secure_https_get_json(const char *url,
         return -ENOMEM;
     }
     code = curl_easy_setopt(handle, CURLOPT_URL, url);
+    if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
     if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
     if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
     if (code == CURLE_OK) code = curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, bounded_response);
@@ -303,6 +304,8 @@ long secure_https_post_json(const char *url,
     }
 
     code = curl_easy_setopt(handle, CURLOPT_URL, url);
+    if (code == CURLE_OK)
+        code = curl_easy_setopt(handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
     if (code == CURLE_OK)
         code = curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
     if (code == CURLE_OK)
