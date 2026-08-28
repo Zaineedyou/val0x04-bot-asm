@@ -72,10 +72,10 @@ def main() -> None:
         "GET / HTTP/1.1\r\n"
         "Host: localhost\r\n"
         "Connection: Upgrade\r\n"
-        "Upgrade: websocket\r\n"
+        "uPgRaDe: WebSocket\r\n"
         "Sec-WebSocket-Version: 13\r\n"
-        f"Sec-WebSocket-Key: {KEY}\r\n"
-        f"X-Auth-Token: {TOKEN}\r\n\r\n"
+        f"Sec-WebSocket-Key:\t{KEY}\r\n"
+        f"x-aUtH-tOkEn:\t{TOKEN}\r\n\r\n"
     ).encode()
     with socket.create_connection((HOST, PORT), timeout=3) as sock:
         sock.settimeout(3)

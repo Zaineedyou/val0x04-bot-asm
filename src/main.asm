@@ -667,10 +667,10 @@ handle_http_request:
     test al, al
     jz .bridge_unauthorized
     lea rdi, [request_buffer]
-    lea rsi, [upgrade_header]
-    mov ecx, upgrade_header_len
+    lea rsi, [upgrade_header_name]
+    mov ecx, upgrade_header_name_len
     mov rdx, [request_length]
-    call find_bytes
+    call find_header
     test rax, rax
     jz .send_upgrade_required
     call upgrade_websocket
@@ -1223,6 +1223,86 @@ find_bytes:
     pop r12
     ret
 
+; Find an HTTP header name at a line boundary, case-insensitive.
+; RDI=buffer, RSI=name, RCX=name length, RDX=buffer length.
+; RAX=value pointer after ':' and optional SP/HTAB, or zero.
+find_header:
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13, rdx
+    mov r14, rsi
+    mov r15, rcx
+    lea r11, [r12 + r13]
+.scan:
+    cmp r12, r11
+    jae .none
+    cmp r12, rdi
+    je .candidate
+    cmp byte [r12 - 1], 10
+    jne .advance
+.candidate:
+    mov r8, r12
+    mov r9, r14
+    mov r10, r15
+.compare:
+    test r10, r10
+    jz .name_done
+    cmp r8, r11
+    jae .advance
+    mov al, [r8]
+    mov dl, [r9]
+    cmp al, 'A'
+    jb .left_lower
+    cmp al, 'Z'
+    ja .left_lower
+    add al, 32
+.left_lower:
+    cmp dl, 'A'
+    jb .right_lower
+    cmp dl, 'Z'
+    ja .right_lower
+    add dl, 32
+.right_lower:
+    cmp al, dl
+    jne .advance
+    inc r8
+    inc r9
+    dec r10
+    jmp .compare
+.name_done:
+    cmp r8, r11
+    jae .advance
+    cmp byte [r8], ':'
+    jne .advance
+    inc r8
+.skip_ows:
+    cmp r8, r11
+    jae .none
+    cmp byte [r8], ' '
+    je .skip_one
+    cmp byte [r8], 9
+    jne .found
+.skip_one:
+    inc r8
+    jmp .skip_ows
+.found:
+    mov rax, r8
+    jmp .out
+.advance:
+    inc r12
+    jmp .scan
+.none:
+    xor eax, eax
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
 ; rdi and rsi point to buffers, rcx is their common length. AL = equality.
 memory_equal:
     test rcx, rcx
@@ -1340,13 +1420,12 @@ bridge_authorized:
     cmp dword [bridge_token_len], 0
     je .no
     lea rdi, [request_buffer]
-    lea rsi, [bridge_authorization_prefix]
-    mov ecx, bridge_authorization_prefix_len
+    lea rsi, [bridge_authorization_name]
+    mov ecx, bridge_authorization_name_len
     mov rdx, [request_length]
-    call find_bytes
+    call find_header
     test rax, rax
     jz .no
-    add rax, bridge_authorization_prefix_len
     mov rdi, rax
     mov rsi, [bridge_token_ptr]
     mov ecx, dword [bridge_token_len]
@@ -1374,13 +1453,12 @@ upgrade_websocket:
     test al, al
     jz .conflict
     lea rdi, [request_buffer]
-    lea rsi, [websocket_key_prefix]
-    mov ecx, websocket_key_prefix_len
+    lea rsi, [websocket_key_name]
+    mov ecx, websocket_key_name_len
     mov rdx, [request_length]
-    call find_bytes
+    call find_header
     test rax, rax
     jz .missing_key
-    add rax, websocket_key_prefix_len
     mov r12, rax
     mov rdi, r12
     call line_length
@@ -2434,12 +2512,12 @@ websocket_send_frame:
     ret
 
 section .rodata
-bridge_authorization_prefix: db 'X-Auth-Token: '
-bridge_authorization_prefix_len equ $ - bridge_authorization_prefix
-upgrade_header:        db 'Upgrade: websocket'
-upgrade_header_len     equ $ - upgrade_header
-websocket_key_prefix:  db 'Sec-WebSocket-Key: '
-websocket_key_prefix_len equ $ - websocket_key_prefix
+bridge_authorization_name: db 'X-Auth-Token'
+bridge_authorization_name_len equ $ - bridge_authorization_name
+upgrade_header_name:   db 'Upgrade'
+upgrade_header_name_len equ $ - upgrade_header_name
+websocket_key_name:    db 'Sec-WebSocket-Key'
+websocket_key_name_len equ $ - websocket_key_name
 websocket_magic:       db '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 websocket_magic_len    equ $ - websocket_magic
 websocket_handshake_prefix:
