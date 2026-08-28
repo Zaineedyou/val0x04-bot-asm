@@ -105,11 +105,19 @@ gateway_connect_loop:
 
 ; Wait for Hello (opcode 10), then cache the server heartbeat interval.
 gateway_wait_hello:
+    call gateway_now_ms
+    add rax, 15000
+    mov [gateway_hello_deadline_ms], rax
 .wait:
     call gateway_poll_readable
     test eax, eax
     js .bad
-    jz .wait
+    jnz .readable
+    call gateway_now_ms
+    cmp rax, [gateway_hello_deadline_ms]
+    jb .wait
+    jmp .bad
+.readable:
     call gateway_receive_packet
     test eax, eax
     js .bad
@@ -1381,6 +1389,7 @@ section .data
 align 8
 heartbeat_interval_ms: dq 45000
 heartbeat_due_ms: dq 0
+gateway_hello_deadline_ms: dq 0
 gateway_connect_url: dq gateway_url
 gateway_session_valid: dd 0
 gateway_session_id_len: dd 0
