@@ -1363,13 +1363,13 @@ upgrade_websocket:
     mov rdx, [request_length]
     call find_bytes
     test rax, rax
-    jz .bad_request
+    jz .missing_key
     add rax, websocket_key_prefix_len
     mov r12, rax
     mov rdi, r12
     call line_length
     cmp eax, 24                         ; RFC 6455 client key: Base64(16 bytes)
-    jne .bad_request
+    jne .bad_key_length
 
     ; SHA1(Sec-WebSocket-Key || RFC 6455 magic GUID), then Base64.
     lea rdi, [sha_input]
@@ -1412,6 +1412,15 @@ upgrade_websocket:
     mov edx, response_conflict_len
     call write_all
     jmp .out
+.missing_key:
+    lea rdi, [log_ws_key_missing]
+    mov esi, log_ws_key_missing_len
+    call log_static
+    jmp .bad_request
+.bad_key_length:
+    lea rdi, [log_ws_key_length]
+    mov esi, log_ws_key_length_len
+    call log_static
 .bad_request:
     lea rdi, [log_ws_bad_handshake]
     mov esi, log_ws_bad_handshake_len
@@ -2650,8 +2659,12 @@ log_panel_bad_json:      db 'val0x04-asm: JSON panel tidak valid atau pesan dito
 log_panel_bad_json_len equ $ - log_panel_bad_json
 log_bridge_conflict:     db 'val0x04-asm: koneksi bridge kedua ditolak (409)',10
 log_bridge_conflict_len equ $ - log_bridge_conflict
-log_ws_bad_handshake:    db 'val0x04-asm: handshake WebSocket tidak valid',10
+log_ws_bad_handshake:    db 'val0x04-asm: Fabric bridge menolak handshake WebSocket',10
 log_ws_bad_handshake_len equ $ - log_ws_bad_handshake
+log_ws_key_missing:       db 'val0x04-asm: header Sec-WebSocket-Key tidak ditemukan',10
+log_ws_key_missing_len equ $ - log_ws_key_missing
+log_ws_key_length:        db 'val0x04-asm: panjang Sec-WebSocket-Key tidak valid',10
+log_ws_key_length_len equ $ - log_ws_key_length
 log_ws_protocol_error:   db 'val0x04-asm: frame WebSocket tidak valid atau tidak termask',10
 log_ws_protocol_error_len equ $ - log_ws_protocol_error
 log_ws_poll_failed:      db 'val0x04-asm: poll() WebSocket gagal',10

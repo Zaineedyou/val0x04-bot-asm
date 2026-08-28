@@ -38,7 +38,35 @@ def masked_frame(opcode: int, payload: bytes = b"") -> bytes:
     return bytes([0x80 | opcode, 0x80 | len(payload)]) + mask + body
 
 
+def expect_bad_handshake(request: bytes) -> None:
+    with socket.create_connection((HOST, PORT), timeout=3) as sock:
+        sock.settimeout(3)
+        sock.sendall(request)
+        response = recv_until(sock, b"\r\n\r\n").decode("ascii")
+        assert response.startswith("HTTP/1.1 400"), response
+
+
 def main() -> None:
+    expect_bad_handshake(
+        (
+            "GET / HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Connection: Upgrade\r\n"
+            "Upgrade: websocket\r\n"
+            "X-Auth-Token: " + TOKEN + "\r\n\r\n"
+        ).encode()
+    )
+    expect_bad_handshake(
+        (
+            "GET / HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Connection: Upgrade\r\n"
+            "Upgrade: websocket\r\n"
+            "Sec-WebSocket-Key: short\r\n"
+            "X-Auth-Token: " + TOKEN + "\r\n\r\n"
+        ).encode()
+    )
+
     request = (
         "GET / HTTP/1.1\r\n"
         "Host: localhost\r\n"
