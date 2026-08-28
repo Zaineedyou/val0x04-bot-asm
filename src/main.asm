@@ -2173,7 +2173,7 @@ build_fabric_event:
     mov edx, title_player_joined_len
     lea rcx, [event_field]
     mov r8d, [event_field_len]
-    call build_embed_with_field
+    call build_embed_payload
     jmp .send
 .leave:
     call extract_player
@@ -2182,7 +2182,7 @@ build_fabric_event:
     mov edx, title_player_left_len
     lea rcx, [event_field]
     mov r8d, [event_field_len]
-    call build_embed_with_field
+    call build_embed_payload
     jmp .send
 .death:
     call extract_message
