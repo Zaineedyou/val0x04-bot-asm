@@ -93,6 +93,8 @@ int secure_gateway_connect(const char *wss_url) {
 
     code = curl_easy_setopt(gateway, CURLOPT_URL, wss_url);
     if (code == CURLE_OK)
+        code = curl_easy_setopt(gateway, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+    if (code == CURLE_OK)
         code = curl_easy_setopt(gateway, CURLOPT_CONNECT_ONLY, 2L);
     if (code == CURLE_OK)
         code = curl_easy_setopt(gateway, CURLOPT_TIMEOUT_MS, 15000L);

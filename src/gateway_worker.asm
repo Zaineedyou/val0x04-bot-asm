@@ -1303,7 +1303,7 @@ gateway_now_ms:
     ret
 
 section .rodata
-gateway_url: db 'wss://gateway.discord.gg/?v=10',0
+gateway_url: db 'wss://gateway.discord.gg/?v=10&encoding=json',0
 hello_interval_key: db '"heartbeat_interval":'
 hello_interval_key_len equ $ - hello_interval_key
 message_create_key: db '"t":"MESSAGE_CREATE"'
