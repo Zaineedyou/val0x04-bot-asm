@@ -18,6 +18,9 @@ extern discord_channel_ptr
 extern discord_channel_len
 extern gateway_pipe_write
 extern write_all
+extern log_static
+extern log_transport_failure
+extern log_http_status
 
 global gateway_worker
 global gateway_find_key
@@ -56,7 +59,10 @@ gateway_connect_loop:
     mov rdi, [gateway_connect_url]
     call secure_gateway_connect
     test eax, eax
-    js .retry
+    jns .connected
+    call log_transport_failure
+    jmp .retry
+.connected:
     call gateway_wait_hello
     test eax, eax
     js .close_retry
@@ -118,6 +124,9 @@ gateway_wait_hello:
     xor eax, eax
     ret
 .bad:
+    lea rdi, [log_gateway_hello_failed]
+    mov esi, log_gateway_hello_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -138,6 +147,10 @@ gateway_identify:
     xor eax, eax
     ret
 .bad:
+    call log_transport_failure
+    lea rdi, [log_gateway_identify_failed]
+    mov esi, log_gateway_identify_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -163,6 +176,10 @@ gateway_resume:
     xor eax, eax
     ret
 .bad:
+    call log_transport_failure
+    lea rdi, [log_gateway_resume_failed]
+    mov esi, log_gateway_resume_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -228,6 +245,9 @@ gateway_capture_ready:
     mov dword [gateway_session_valid], 0
     lea rax, [gateway_url]
     mov [gateway_connect_url], rax
+    lea rdi, [log_gateway_ready_failed]
+    mov esi, log_gateway_ready_failed_len
+    call log_static
     mov eax, -1
 .out:
     pop r15
@@ -253,6 +273,9 @@ gateway_session_loop:
     js .bad
     jmp .loop
 .bad:
+    lea rdi, [log_gateway_session_failed]
+    mov esi, log_gateway_session_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -311,9 +334,15 @@ gateway_dispatch_packet:
     call gateway_send_heartbeat
     ret
 .reconnect:
+    lea rdi, [log_gateway_reconnect]
+    mov esi, log_gateway_reconnect_len
+    call log_static
     mov eax, -1
     ret
 .invalid_session:
+    lea rdi, [log_gateway_invalid_session]
+    mov esi, log_gateway_invalid_session_len
+    call log_static
     call gateway_clear_session
     mov eax, -1
     ret
@@ -339,6 +368,10 @@ gateway_send_heartbeat:
     xor eax, eax
     ret
 .bad:
+    call log_transport_failure
+    lea rdi, [log_gateway_heartbeat_failed]
+    mov esi, log_gateway_heartbeat_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -354,6 +387,9 @@ gateway_check_heartbeat:
     xor eax, eax
     ret
 .bad:
+    lea rdi, [log_gateway_heartbeat_failed]
+    mov esi, log_gateway_heartbeat_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -413,6 +449,10 @@ gateway_receive_packet:
     xor eax, eax
     ret
 .bad:
+    call log_transport_failure
+    lea rdi, [log_gateway_frame_failed]
+    mov esi, log_gateway_frame_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -440,6 +480,10 @@ gateway_poll_readable:
     xor eax, eax
     ret
 .bad:
+    call log_transport_failure
+    lea rdi, [log_gateway_poll_failed]
+    mov esi, log_gateway_poll_failed_len
+    call log_static
     mov eax, -1
     ret
 
@@ -579,6 +623,13 @@ gateway_forward_message:
     lea rsi, [gateway_outgoing]
     mov edx, r14d
     call write_all
+    test rax, rax
+    jle .pipe_write_failed
+    jmp .out
+.pipe_write_failed:
+    lea rdi, [log_gateway_pipe_write_failed]
+    mov esi, log_gateway_pipe_write_failed_len
+    call log_static
 .out:
     pop r14
     pop r13
@@ -675,12 +726,12 @@ gateway_fetch_highest_role:
     lea r9, [gateway_role_http_status]
     call secure_https_get_json
     test rax, rax
-    js .out
+    js .transport_failed
     mov rax, [gateway_role_http_status]
     cmp rax, 200
-    jb .out
+    jb .http_failed
     cmp rax, 300
-    jae .out
+    jae .http_failed
 
     mov qword [gateway_best_position], -1
     mov r14, gateway_role_response
@@ -785,6 +836,21 @@ gateway_fetch_highest_role:
     pop r13
     pop r12
     ret
+.transport_failed:
+    call log_transport_failure
+    lea rdi, [log_gateway_role_transport]
+    mov esi, log_gateway_role_transport_len
+    call log_static
+    jmp .out
+.http_failed:
+    lea rdi, [log_gateway_role_http_prefix]
+    mov esi, log_gateway_role_http_prefix_len
+    mov rdx, [gateway_role_http_status]
+    call log_http_status
+    lea rdi, [log_gateway_role_http_failed]
+    mov esi, log_gateway_role_http_failed_len
+    call log_static
+    jmp .out
 
 gateway_find_byte:
     test rsi, rsi
@@ -1157,6 +1223,34 @@ bot_auth_prefix: db 'Bot '
 bot_auth_prefix_len equ $ - bot_auth_prefix
 outgoing_suffix: db '"}'
 outgoing_suffix_len equ $ - outgoing_suffix
+log_gateway_hello_failed: db 'val0x04-asm: Gateway Hello gagal',10
+log_gateway_hello_failed_len equ $ - log_gateway_hello_failed
+log_gateway_identify_failed: db 'val0x04-asm: Gateway Identify gagal',10
+log_gateway_identify_failed_len equ $ - log_gateway_identify_failed
+log_gateway_resume_failed: db 'val0x04-asm: Gateway Resume gagal',10
+log_gateway_resume_failed_len equ $ - log_gateway_resume_failed
+log_gateway_ready_failed: db 'val0x04-asm: payload READY tidak lengkap',10
+log_gateway_ready_failed_len equ $ - log_gateway_ready_failed
+log_gateway_session_failed: db 'val0x04-asm: sesi Gateway berhenti',10
+log_gateway_session_failed_len equ $ - log_gateway_session_failed
+log_gateway_heartbeat_failed: db 'val0x04-asm: heartbeat Gateway gagal atau ACK timeout',10
+log_gateway_heartbeat_failed_len equ $ - log_gateway_heartbeat_failed
+log_gateway_frame_failed: db 'val0x04-asm: frame Gateway gagal diproses',10
+log_gateway_frame_failed_len equ $ - log_gateway_frame_failed
+log_gateway_poll_failed: db 'val0x04-asm: poll Gateway gagal',10
+log_gateway_poll_failed_len equ $ - log_gateway_poll_failed
+log_gateway_reconnect: db 'val0x04-asm: Discord meminta reconnect',10
+log_gateway_reconnect_len equ $ - log_gateway_reconnect
+log_gateway_invalid_session: db 'val0x04-asm: sesi Gateway tidak valid; kembali ke Identify',10
+log_gateway_invalid_session_len equ $ - log_gateway_invalid_session
+log_gateway_role_transport: db 'val0x04-asm: role lookup Discord gagal di transport',10
+log_gateway_role_transport_len equ $ - log_gateway_role_transport
+log_gateway_role_http_prefix: db 'val0x04-asm: role lookup Discord HTTP status='
+log_gateway_role_http_prefix_len equ $ - log_gateway_role_http_prefix
+log_gateway_role_http_failed: db 'val0x04-asm: role lookup Discord ditolak oleh API',10
+log_gateway_role_http_failed_len equ $ - log_gateway_role_http_failed
+log_gateway_pipe_write_failed: db 'val0x04-asm: write pipe Gateway ke bridge gagal',10
+log_gateway_pipe_write_failed_len equ $ - log_gateway_pipe_write_failed
 
 section .data
 align 8

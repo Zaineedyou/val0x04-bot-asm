@@ -51,7 +51,7 @@ int secure_transport_init(void) {
 }
 
 const char *secure_transport_last_error(void) {
-    return last_error[0] ? last_error : curl_easy_strerror(CURLE_OK);
+    return last_error;
 }
 
 const char *secure_transport_last_response(void) {

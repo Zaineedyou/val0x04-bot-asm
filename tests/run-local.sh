@@ -37,5 +37,17 @@ secure_failure="$(curl --http1.1 --silent --show-error --max-time 20 -i -X POST 
 printf '%s\n' "$secure_failure" | grep -F 'HTTP/1.1 502 Bad Gateway'
 printf '%s\n' "$secure_failure" | grep -F 'Discord transport rejected the request'
 
+# Every deliberately triggered failure above must be visible in stderr, while
+# credentials and request content must never appear in the diagnostic stream.
+grep -F 'autentikasi panel ditolak' /tmp/val0x04-asm-test.log
+grep -F 'JSON panel tidak valid atau pesan ditolak' /tmp/val0x04-asm-test.log
+grep -F 'transport Discord gagal, HTTP status=' /tmp/val0x04-asm-test.log
+grep -F 'detail transport:' /tmp/val0x04-asm-test.log
+if grep -Eq 'panel-test|bridge-test|DISCORD_TOKEN|dummy|test' /tmp/val0x04-asm-test.log; then
+  echo 'diagnostic log leaked credential or request content' >&2
+  exit 1
+fi
+
 PORT="$port" python3 tests/ws_smoke.py
+grep -F 'frame WebSocket tidak valid atau tidak termask' /tmp/val0x04-asm-test.log
 printf '%s\n' 'All local release checks passed.'

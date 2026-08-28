@@ -10,6 +10,7 @@ global gateway_extract_sequence
 global gateway_build_identify
 global gateway_build_heartbeat
 global gateway_build_resume
+global gateway_write_u64
 
 section .text
 

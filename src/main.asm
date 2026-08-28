@@ -19,6 +19,7 @@ extern gateway_escape_copy
 extern gateway_copy
 extern gateway_find_key
 extern gateway_decode_string
+extern gateway_write_u64
 
 global discord_token_ptr
 global discord_token_len
@@ -26,6 +27,9 @@ global discord_channel_ptr
 global discord_channel_len
 global gateway_pipe_write
 global write_all
+global log_static
+global log_transport_failure
+global log_http_status
 
 %define SYS_READ            0
 %define SYS_WRITE           1
@@ -91,7 +95,8 @@ asm_service_start:
     mov edx, 1000
     syscall
     test rax, rax
-    jle .accept_loop
+    js .poll_error
+    jz .accept_loop
     test word [listener_pollfds + 6], POLLIN
     jz .accept_loop
 
@@ -101,10 +106,27 @@ asm_service_start:
     xor edx, edx
     syscall
     test rax, rax
-    js .accept_loop
+    js .accept_error
 
     mov rdi, rax
     call spawn_client_process
+    test eax, eax
+    js .fork_error
+    jmp .accept_loop
+.poll_error:
+    lea rdi, [log_poll_failed]
+    mov esi, log_poll_failed_len
+    call log_static
+    jmp .accept_loop
+.accept_error:
+    lea rdi, [log_accept_failed]
+    mov esi, log_accept_failed_len
+    call log_static
+    jmp .accept_loop
+.fork_error:
+    lea rdi, [log_client_fork_failed]
+    mov esi, log_client_fork_failed_len
+    call log_static
     jmp .accept_loop
 
 ; ---------------------------------------------------------------------------
@@ -127,7 +149,7 @@ spawn_client_process:
     mov eax, SYS_FORK
     syscall
     test rax, rax
-    js .parent
+    js .fork_failed
     jnz .parent
     mov [client_fd], r12d
     mov eax, SYS_PRCTL
@@ -148,10 +170,15 @@ spawn_client_process:
     mov eax, SYS_EXIT
     xor edi, edi
     syscall
+.fork_failed:
+    mov eax, -1
+    pop r12
+    ret
 .parent:
     mov eax, SYS_CLOSE
     mov edi, r12d
     syscall
+    xor eax, eax
     pop r12
     ret
 
@@ -209,7 +236,8 @@ drain_gateway_messages:
     xor edx, edx
     syscall
     test rax, rax
-    jle .done
+    js .pipe_poll_failed
+    jz .done
     test word [gateway_pipe_poll + 6], POLLIN
     jz .done
 
@@ -224,7 +252,8 @@ drain_gateway_messages:
     mov eax, SYS_READ
     syscall
     test rax, rax
-    jle .done
+    js .pipe_read_failed
+    jz .done
     add r8, rax
     mov [gateway_message_length], r8d
     cmp dword [bridge_active], 0
@@ -246,6 +275,8 @@ drain_gateway_messages:
     mov esi, ecx
     mov edx, 1
     call websocket_send_frame
+    test eax, eax
+    js .pipe_send_failed
 .remove_line:
     mov r9, r8
     sub r9, rcx
@@ -265,6 +296,21 @@ drain_gateway_messages:
     mov dword [gateway_message_length], 0
 .done:
     ret
+.pipe_poll_failed:
+    lea rdi, [log_pipe_poll_failed]
+    mov esi, log_pipe_poll_failed_len
+    call log_static
+    jmp .done
+.pipe_read_failed:
+    lea rdi, [log_pipe_read_failed]
+    mov esi, log_pipe_read_failed_len
+    call log_static
+    jmp .done
+.pipe_send_failed:
+    lea rdi, [log_pipe_send_failed]
+    mov esi, log_pipe_send_failed_len
+    call log_static
+    jmp .done
 
 ; ---------------------------------------------------------------------------
 ; Environment configuration.
@@ -446,6 +492,15 @@ cstring_length:
 .done:
     ret
 
+; Tulis satu pesan diagnostik tetap ke stderr.
+; RDI = alamat pesan, RSI = panjang pesan.
+log_static:
+    mov rdx, rsi
+    mov rsi, rdi
+    mov edi, 2
+    call write_all
+    ret
+
 ; ---------------------------------------------------------------------------
 ; TCP listener.
 ; ---------------------------------------------------------------------------
@@ -466,6 +521,8 @@ open_listener:
     lea r10, [one]
     mov r8d, 4
     syscall
+    test rax, rax
+    js .setsockopt_failed
 
     mov eax, SYS_BIND
     mov edi, dword [server_fd]
@@ -482,6 +539,11 @@ open_listener:
     test rax, rax
     js fatal_listen
     ret
+.setsockopt_failed:
+    lea rdi, [log_setsockopt_failed]
+    mov esi, log_setsockopt_failed_len
+    call log_static
+    jmp fatal_socket
 
 ; ---------------------------------------------------------------------------
 ; HTTP/1.1 subset. One complete request per accepted connection.
@@ -496,7 +558,12 @@ handle_http_request:
     mov edx, REQUEST_CAPACITY - 1
     syscall
     test rax, rax
-    jle .done
+    jg .request_ready
+    lea rdi, [log_http_read_failed]
+    mov esi, log_http_read_failed_len
+    call log_static
+    jmp .done
+.request_ready:
     mov [request_length], rax
     mov byte [request_buffer + rax], 0
 
@@ -528,6 +595,9 @@ handle_http_request:
     test al, al
     jnz .upgrade_required
 
+    lea rdi, [log_route_not_found]
+    mov esi, log_route_not_found_len
+    call log_static
     lea rsi, [response_not_found]
     mov edx, response_not_found_len
     jmp .send
@@ -552,6 +622,9 @@ handle_http_request:
     mov edx, response_discord_sent_len
     jmp .send
 .bad_request:
+    lea rdi, [log_panel_bad_json]
+    mov esi, log_panel_bad_json_len
+    call log_static
     lea rsi, [response_bad_request]
     mov edx, response_bad_request_len
     jmp .send
@@ -559,14 +632,24 @@ handle_http_request:
     lea rsi, [response_discord_failure]
     mov edx, response_discord_failure_len
     jmp .send
+.bridge_unauthorized:
+    lea rdi, [log_bridge_unauthorized]
+    mov esi, log_bridge_unauthorized_len
+    call log_static
+    lea rsi, [response_unauthorized]
+    mov edx, response_unauthorized_len
+    jmp .send
 .unauthorized:
+    lea rdi, [log_panel_unauthorized]
+    mov esi, log_panel_unauthorized_len
+    call log_static
     lea rsi, [response_unauthorized]
     mov edx, response_unauthorized_len
     jmp .send
 .upgrade_required:
     call bridge_authorized
     test al, al
-    jz .unauthorized
+    jz .bridge_unauthorized
     lea rdi, [request_buffer]
     lea rsi, [upgrade_header]
     mov ecx, upgrade_header_len
@@ -963,7 +1046,7 @@ send_discord_json_buffer:
     xor eax, eax
     jmp .out
 .bad:
-    call log_discord_failure
+    call log_transport_failure
     mov eax, -1
 .out:
     pop r15
@@ -973,63 +1056,73 @@ send_discord_json_buffer:
     pop rbx
     ret
 
-; Log only the bounded Discord response or transport error; never log tokens.
-log_discord_failure:
+; Write a status-only HTTP diagnostic. The destination is never a URL/body.
+; RDI=prefix, RSI=prefix length, RDX=status.
+log_http_status:
     push r12
     push r13
     push r14
-    push r15
+    mov r12, rdi
+    mov r13d, esi
+    mov r14, rdx
     lea rdi, [discord_log_buffer]
-    lea rsi, [discord_log_prefix]
-    mov edx, discord_log_prefix_len
-    call memory_copy
-    mov r13d, discord_log_prefix_len
-    call secure_transport_last_response
-    mov r12, rax
-    test r12, r12
-    jz .use_error
-    mov rdi, r12
-    call cstring_length
-    test eax, eax
-    jz .use_error
-    mov r14d, eax
-    cmp r14d, 900
-    jbe .copy_response
-    mov r14d, 900
-.copy_response:
-    lea rdi, [discord_log_buffer + r13]
     mov rsi, r12
-    mov edx, r14d
+    mov edx, r13d
     call memory_copy
-    add r13d, r14d
-    jmp .finish
-.use_error:
-    call secure_transport_last_error
-    mov r12, rax
-    test r12, r12
-    jz .finish
-    mov rdi, r12
-    call cstring_length
-    test eax, eax
-    jz .finish
-    mov r14d, eax
-    cmp r14d, 900
-    jbe .copy_error
-    mov r14d, 900
-.copy_error:
     lea rdi, [discord_log_buffer + r13]
-    mov rsi, r12
-    mov edx, r14d
-    call memory_copy
-    add r13d, r14d
-.finish:
+    mov rax, r14
+    call gateway_write_u64
+    add r13d, eax
     mov byte [discord_log_buffer + r13], 10
     inc r13d
     mov edi, 2
     lea rsi, [discord_log_buffer]
     mov edx, r13d
     call write_all
-    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+; Log status plus a bounded libcurl error string; never log response/request data.
+log_transport_failure:
+    push r12
+    push r13
+    push r14
+    lea rdi, [transport_status_prefix]
+    mov esi, transport_status_prefix_len
+    mov rdx, [discord_http_status]
+    call log_http_status
+    call secure_transport_last_error
+    mov r12, rax
+    test r12, r12
+    jz .done
+    mov rdi, r12
+    call cstring_length
+    test eax, eax
+    jz .done
+    mov r14d, eax
+    cmp r14d, 900
+    jbe .copy_error
+    mov r14d, 900
+.copy_error:
+    lea rdi, [discord_log_buffer]
+    lea rsi, [transport_detail_prefix]
+    mov edx, transport_detail_prefix_len
+    call memory_copy
+    mov r13d, transport_detail_prefix_len
+    lea rdi, [discord_log_buffer + r13]
+    mov rsi, r12
+    mov edx, r14d
+    call memory_copy
+    add r13d, r14d
+    mov byte [discord_log_buffer + r13], 10
+    inc r13d
+    mov edi, 2
+    lea rsi, [discord_log_buffer]
+    mov edx, r13d
+    call write_all
+.done:
     pop r14
     pop r13
     pop r12
@@ -1311,12 +1404,18 @@ upgrade_websocket:
     call websocket_loop
     jmp .out
 .conflict:
+    lea rdi, [log_bridge_conflict]
+    mov esi, log_bridge_conflict_len
+    call log_static
     mov edi, dword [client_fd]
     lea rsi, [response_conflict]
     mov edx, response_conflict_len
     call write_all
     jmp .out
 .bad_request:
+    lea rdi, [log_ws_bad_handshake]
+    mov esi, log_ws_bad_handshake_len
+    call log_static
     call bridge_lock_release
     mov dword [bridge_active], 0
     mov edi, dword [client_fd]
@@ -1660,11 +1759,11 @@ websocket_loop:
     mov edx, 1000
     syscall
     test rax, rax
-    js .done
+    js .poll_failed
     jz .timeout
     call websocket_receive_frame
     test eax, eax
-    js .done
+    js .frame_failed
     mov dword [ws_idle_seconds], 0
     mov dword [ws_next_ping], 20
     jmp .loop
@@ -1672,7 +1771,7 @@ websocket_loop:
     add dword [ws_idle_seconds], 1
     mov eax, [ws_idle_seconds]
     cmp eax, 75
-    jae .done
+    jae .idle_timeout
     cmp eax, [ws_next_ping]
     jb .loop
     add dword [ws_next_ping], 20
@@ -1680,8 +1779,29 @@ websocket_loop:
     xor esi, esi
     mov edx, 9                             ; Ping
     call websocket_send_frame
+    test eax, eax
+    js .send_failed
     jmp .loop
-    .done:
+.poll_failed:
+    lea rdi, [log_ws_poll_failed]
+    mov esi, log_ws_poll_failed_len
+    call log_static
+    jmp .done
+.frame_failed:
+    lea rdi, [log_ws_protocol_error]
+    mov esi, log_ws_protocol_error_len
+    call log_static
+    jmp .done
+.send_failed:
+    lea rdi, [log_ws_send_failed]
+    mov esi, log_ws_send_failed_len
+    call log_static
+    jmp .done
+.idle_timeout:
+    lea rdi, [log_ws_idle_timeout]
+    mov esi, log_ws_idle_timeout_len
+    call log_static
+.done:
     mov dword [bridge_active], 0
     ret
 
@@ -1756,6 +1876,9 @@ websocket_receive_frame:
     xor eax, eax
     ret
 .bad:
+    lea rdi, [log_ws_protocol_error]
+    mov esi, log_ws_protocol_error_len
+    call log_static
     mov eax, -1
     ret
 
@@ -2432,8 +2555,10 @@ discord_json_prefix:    db '{"content":"'
 discord_json_prefix_len equ $ - discord_json_prefix
 discord_json_suffix:    db '"}'
 discord_json_suffix_len equ $ - discord_json_suffix
-discord_log_prefix:     db 'val0x04-asm: Discord POST failed: '
-discord_log_prefix_len equ $ - discord_log_prefix
+transport_status_prefix: db 'val0x04-asm: transport Discord gagal, HTTP status='
+transport_status_prefix_len equ $ - transport_status_prefix
+transport_detail_prefix: db 'val0x04-asm: detail transport: '
+transport_detail_prefix_len equ $ - transport_detail_prefix
 
 response_health:
     db 'HTTP/1.1 200 OK',13,10
@@ -2505,6 +2630,42 @@ error_gateway:         db 'val0x04-asm: Gateway worker setup failed',10
 error_gateway_len equ $ - error_gateway
 error_config:          db 'val0x04-asm: required environment is missing or invalid',10
 error_config_len equ $ - error_config
+log_accept_failed:       db 'val0x04-asm: accept() gagal',10
+log_accept_failed_len equ $ - log_accept_failed
+log_poll_failed:         db 'val0x04-asm: poll() listener gagal',10
+log_poll_failed_len equ $ - log_poll_failed
+log_client_fork_failed:  db 'val0x04-asm: fork() koneksi gagal',10
+log_client_fork_failed_len equ $ - log_client_fork_failed
+log_http_read_failed:    db 'val0x04-asm: request HTTP kosong atau gagal dibaca',10
+log_http_read_failed_len equ $ - log_http_read_failed
+log_route_not_found:     db 'val0x04-asm: route HTTP tidak dikenal',10
+log_route_not_found_len equ $ - log_route_not_found
+log_panel_unauthorized:  db 'val0x04-asm: autentikasi panel ditolak',10
+log_panel_unauthorized_len equ $ - log_panel_unauthorized
+log_bridge_unauthorized: db 'val0x04-asm: autentikasi bridge ditolak',10
+log_bridge_unauthorized_len equ $ - log_bridge_unauthorized
+log_setsockopt_failed:   db 'val0x04-asm: setsockopt() gagal',10
+log_setsockopt_failed_len equ $ - log_setsockopt_failed
+log_panel_bad_json:      db 'val0x04-asm: JSON panel tidak valid atau pesan ditolak',10
+log_panel_bad_json_len equ $ - log_panel_bad_json
+log_bridge_conflict:     db 'val0x04-asm: koneksi bridge kedua ditolak (409)',10
+log_bridge_conflict_len equ $ - log_bridge_conflict
+log_ws_bad_handshake:    db 'val0x04-asm: handshake WebSocket tidak valid',10
+log_ws_bad_handshake_len equ $ - log_ws_bad_handshake
+log_ws_protocol_error:   db 'val0x04-asm: frame WebSocket tidak valid atau tidak termask',10
+log_ws_protocol_error_len equ $ - log_ws_protocol_error
+log_ws_poll_failed:      db 'val0x04-asm: poll() WebSocket gagal',10
+log_ws_poll_failed_len equ $ - log_ws_poll_failed
+log_pipe_read_failed:    db 'val0x04-asm: pembacaan pipe Gateway gagal',10
+log_pipe_read_failed_len equ $ - log_pipe_read_failed
+log_pipe_poll_failed:    db 'val0x04-asm: poll() pipe Gateway gagal',10
+log_pipe_poll_failed_len equ $ - log_pipe_poll_failed
+log_pipe_send_failed:    db 'val0x04-asm: forwarding pipe ke Fabric gagal',10
+log_pipe_send_failed_len equ $ - log_pipe_send_failed
+log_ws_send_failed:      db 'val0x04-asm: pengiriman frame WebSocket gagal',10
+log_ws_send_failed_len equ $ - log_ws_send_failed
+log_ws_idle_timeout:     db 'val0x04-asm: koneksi bridge timeout setelah 75 detik',10
+log_ws_idle_timeout_len equ $ - log_ws_idle_timeout
 
 section .data
 align 8
