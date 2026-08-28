@@ -63,14 +63,20 @@ gateway_connect_loop:
     call log_transport_failure
     jmp .retry
 .connected:
+    lea rdi, [log_gateway_connected]
+    mov esi, log_gateway_connected_len
+    call log_static
     call gateway_wait_hello
     test eax, eax
     js .close_retry
+    lea rdi, [log_gateway_hello_ok]
+    mov esi, log_gateway_hello_ok_len
+    call log_static
     cmp dword [gateway_session_valid], 0
     je .identify
     call gateway_resume
     test eax, eax
-    jz .session
+    jz .resumed
     call gateway_clear_session
     jmp .close_retry
 .identify:
@@ -78,6 +84,14 @@ gateway_connect_loop:
     call gateway_identify
     test eax, eax
     js .close_retry
+    lea rdi, [log_gateway_identify_ok]
+    mov esi, log_gateway_identify_ok_len
+    call log_static
+    jmp .session
+.resumed:
+    lea rdi, [log_gateway_resume_ok]
+    mov esi, log_gateway_resume_ok_len
+    call log_static
 .session:
     call gateway_session_loop
 .close_retry:
@@ -323,8 +337,16 @@ gateway_dispatch_packet:
     jmp .ok
 .ready:
     call gateway_capture_ready
+    test eax, eax
+    js .ready_failed
+    lea rdi, [log_gateway_ready_ok]
+    mov esi, log_gateway_ready_ok_len
+    call log_static
 .ok:
     xor eax, eax
+    ret
+.ready_failed:
+    mov eax, -1
     ret
 .ack:
     mov dword [heartbeat_waiting], 0
@@ -1223,6 +1245,16 @@ bot_auth_prefix: db 'Bot '
 bot_auth_prefix_len equ $ - bot_auth_prefix
 outgoing_suffix: db '"}'
 outgoing_suffix_len equ $ - outgoing_suffix
+log_gateway_connected: db 'val0x04-asm: WSS Gateway terhubung',10
+log_gateway_connected_len equ $ - log_gateway_connected
+log_gateway_hello_ok: db 'val0x04-asm: Gateway Hello diterima',10
+log_gateway_hello_ok_len equ $ - log_gateway_hello_ok
+log_gateway_identify_ok: db 'val0x04-asm: Gateway Identify terkirim',10
+log_gateway_identify_ok_len equ $ - log_gateway_identify_ok
+log_gateway_resume_ok: db 'val0x04-asm: Gateway Resume terkirim',10
+log_gateway_resume_ok_len equ $ - log_gateway_resume_ok
+log_gateway_ready_ok: db 'val0x04-asm: Gateway READY diterima',10
+log_gateway_ready_ok_len equ $ - log_gateway_ready_ok
 log_gateway_hello_failed: db 'val0x04-asm: Gateway Hello gagal',10
 log_gateway_hello_failed_len equ $ - log_gateway_hello_failed
 log_gateway_identify_failed: db 'val0x04-asm: Gateway Identify gagal',10
