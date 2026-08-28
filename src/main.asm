@@ -590,10 +590,22 @@ handle_http_request:
     call has_prefix
     test al, al
     jnz .health
+    lea rdi, [request_buffer]
+    lea rsi, [method_health_query]
+    mov ecx, method_health_query_len
+    call has_prefix
+    test al, al
+    jnz .health
 
     lea rdi, [request_buffer]
     lea rsi, [method_panel]
     mov ecx, method_panel_len
+    call has_prefix
+    test al, al
+    jnz .panel
+    lea rdi, [request_buffer]
+    lea rsi, [method_panel_query]
+    mov ecx, method_panel_query_len
     call has_prefix
     test al, al
     jnz .panel
@@ -604,10 +616,22 @@ handle_http_request:
     call has_prefix
     test al, al
     jnz .chat
+    lea rdi, [request_buffer]
+    lea rsi, [method_chat_query]
+    mov ecx, method_chat_query_len
+    call has_prefix
+    test al, al
+    jnz .chat
 
     lea rdi, [request_buffer]
     lea rsi, [method_root]
     mov ecx, method_root_len
+    call has_prefix
+    test al, al
+    jnz .upgrade_required
+    lea rdi, [request_buffer]
+    lea rsi, [method_root_query]
+    mov ecx, method_root_query_len
     call has_prefix
     test al, al
     jnz .upgrade_required
@@ -2603,12 +2627,20 @@ env_discord_channel_len equ $ - env_discord_channel
 
 method_health:         db 'GET /health '
 method_health_len      equ $ - method_health
+method_health_query:   db 'GET /health?'
+method_health_query_len equ $ - method_health_query
 method_panel:          db 'GET /panel '
 method_panel_len       equ $ - method_panel
+method_panel_query:    db 'GET /panel?'
+method_panel_query_len equ $ - method_panel_query
 method_chat:           db 'POST /api/chat '
 method_chat_len        equ $ - method_chat
+method_chat_query:     db 'POST /api/chat?'
+method_chat_query_len  equ $ - method_chat_query
 method_root:           db 'GET / '
 method_root_len        equ $ - method_root
+method_root_query:     db 'GET /?'
+method_root_query_len  equ $ - method_root_query
 fabric_message_prefix: db '"message":"'
 fabric_message_prefix_len equ $ - fabric_message_prefix
 event_type_key:        db '"type":"'
