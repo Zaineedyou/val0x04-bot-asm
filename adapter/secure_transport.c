@@ -127,7 +127,11 @@ long secure_gateway_send_text(const char *data, size_t len) {
 long secure_gateway_recv(char *out, size_t cap, size_t *out_len,
                          unsigned int *out_flags, size_t *out_bytes_left) {
     size_t received = 0;
+#if LIBCURL_VERSION_NUM >= 0x080000
     const struct curl_ws_frame *meta = NULL;
+#else
+    struct curl_ws_frame *meta = NULL;
+#endif
     CURLcode code;
 
     if (!gateway || !out || !out_len || !out_flags || !out_bytes_left || cap == 0)
