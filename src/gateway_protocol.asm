@@ -270,24 +270,24 @@ gateway_build_resume:
     mov edx, resume_prefix_len
     call gateway_copy
     lea rdi, [r12 + resume_prefix_len]
-    mov rsi, r14
-    mov rdx, r15
-    call gateway_copy
-    lea rdi, [r12 + resume_prefix_len]
-    add rdi, r15
-    lea rsi, [resume_middle]
-    mov edx, resume_middle_len
-    call gateway_copy
-    lea rdi, [r12 + resume_prefix_len]
-    add rdi, r15
-    add rdi, resume_middle_len
     mov rsi, rbx
     mov rdx, r11
     call gateway_copy
     lea rdi, [r12 + resume_prefix_len]
-    add rdi, r15
-    add rdi, resume_middle_len
     add rdi, r11
+    lea rsi, [resume_middle]
+    mov edx, resume_middle_len
+    call gateway_copy
+    lea rdi, [r12 + resume_prefix_len]
+    add rdi, r11
+    add rdi, resume_middle_len
+    mov rsi, r14
+    mov rdx, r15
+    call gateway_copy
+    lea rdi, [r12 + resume_prefix_len]
+    add rdi, r11
+    add rdi, resume_middle_len
+    add rdi, r15
     lea rsi, [resume_seq_prefix]
     mov edx, resume_seq_prefix_len
     call gateway_copy
@@ -309,9 +309,9 @@ gateway_build_resume:
     mov edx, resume_suffix_len
     call gateway_copy
     mov eax, resume_prefix_len
-    add eax, r15d
-    add eax, resume_middle_len
     add eax, r11d
+    add eax, resume_middle_len
+    add eax, r15d
     add eax, resume_seq_prefix_len
     add eax, r9d
     add eax, resume_suffix_len
@@ -388,9 +388,9 @@ heartbeat_prefix: db '{"op":1,"d":'
 heartbeat_prefix_len equ $ - heartbeat_prefix
 heartbeat_suffix: db '}'
 heartbeat_suffix_len equ $ - heartbeat_suffix
-resume_prefix: db '{"op":6,"d":{"token":"'
+resume_prefix: db '{"op":6,"d":{"session_id":"'
 resume_prefix_len equ $ - resume_prefix
-resume_middle: db '","session_id":"'
+resume_middle: db '","token":"'
 resume_middle_len equ $ - resume_middle
 resume_seq_prefix: db '","seq":'
 resume_seq_prefix_len equ $ - resume_seq_prefix

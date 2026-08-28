@@ -137,7 +137,7 @@ heartbeat_expected: db '{"op":1,"d":42}'
 heartbeat_expected_len equ $ - heartbeat_expected
 session: db 'session-1'
 session_len equ $ - session
-resume_expected: db '{"op":6,"d":{"token":"abc.def","session_id":"session-1","seq":42}}'
+resume_expected: db '{"op":6,"d":{"session_id":"session-1","token":"abc.def","seq":42}}'
 resume_expected_len equ $ - resume_expected
 
 section .bss
