@@ -642,7 +642,7 @@ gateway_forward_message:
     mov ecx, bot_key_len
     call gateway_find_key
     test rax, rax
-    jz .out
+    jz .not_bot
     add rax, bot_key_len
     cmp dword [rax], 'true'
     jne .not_bot
