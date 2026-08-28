@@ -2159,13 +2159,18 @@ build_fabric_event:
     mov ecx, event_server_stop_len
     call memory_equal
     test al, al
-    jz .out
+    jz .unknown
     lea rsi, [title_server_status]
     mov edx, title_server_status_len
     lea rcx, [description_server_stop]
     mov r8d, description_server_stop_len
     call build_embed_payload
     jmp .send
+.unknown:
+    lea rdi, [log_unknown_event]
+    mov esi, log_unknown_event_len
+    call log_static
+    jmp .out
 .join:
     call extract_player
     call build_bold_player_field
@@ -2858,6 +2863,8 @@ log_pipe_send_failed:    db 'val0x04-asm: forwarding pipe ke Fabric gagal',10
 log_pipe_send_failed_len equ $ - log_pipe_send_failed
 log_ws_send_failed:      db 'val0x04-asm: pengiriman frame WebSocket gagal',10
 log_ws_send_failed_len equ $ - log_ws_send_failed
+log_unknown_event: db 'val0x04-asm: tipe event tidak dikenal dari mod',10
+log_unknown_event_len equ $ - log_unknown_event
 log_ws_idle_timeout:     db 'val0x04-asm: koneksi bridge timeout setelah 75 detik',10
 log_ws_idle_timeout_len equ $ - log_ws_idle_timeout
 
