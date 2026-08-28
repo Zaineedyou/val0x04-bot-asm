@@ -1921,12 +1921,38 @@ base64_sha1:
     pop rbx
     ret
 
-; Poll every five seconds. Ping on every 20 seconds of inactivity and close
-; after 75 seconds without a received frame, matching the source bridge policy.
+bridge_now_ms:
+    mov eax, SYS_CLOCK_GETTIME
+    mov edi, CLOCK_MONOTONIC
+    lea rsi, [ws_clock]
+    syscall
+    test rax, rax
+    js .bad
+    mov rax, [ws_clock]
+    imul rax, 1000
+    mov rdx, [ws_clock + 8]
+    mov rcx, 1000000
+    mov rdi, rax
+    mov rax, rdx
+    xor edx, edx
+    div rcx
+    add rax, rdi
+    ret
+.bad:
+    mov rax, -1
+    ret
+
+; Poll every second. Ping every 20 seconds independently of traffic and close
+; after 75 seconds without a received frame, matching the Rust bridge policy.
 websocket_loop:
+    push r12
     mov dword [bridge_active], 1
-    mov dword [ws_idle_seconds], 0
-    mov dword [ws_next_ping], 20
+    call bridge_now_ms
+    test rax, rax
+    js .done
+    mov [ws_last_seen_ms], rax
+    add rax, 20000
+    mov [ws_ping_due_ms], rax
 .loop:
     call drain_gateway_messages
     mov eax, dword [client_fd]
@@ -1940,27 +1966,32 @@ websocket_loop:
     syscall
     test rax, rax
     js .poll_failed
-    jz .timeout
+    jz .tick
     call websocket_receive_frame
     test eax, eax
     js .frame_failed
-    mov dword [ws_idle_seconds], 0
-    mov dword [ws_next_ping], 20
-    jmp .loop
-.timeout:
-    add dword [ws_idle_seconds], 1
-    mov eax, [ws_idle_seconds]
-    cmp eax, 75
+    call bridge_now_ms
+    test rax, rax
+    js .done
+    mov [ws_last_seen_ms], rax
+    jmp .tick
+.tick:
+    call bridge_now_ms
+    test rax, rax
+    js .done
+    mov r12, rax
+    sub rax, [ws_last_seen_ms]
+    cmp rax, 75000
     jae .idle_timeout
-    cmp eax, [ws_next_ping]
+    cmp r12, [ws_ping_due_ms]
     jb .loop
-    add dword [ws_next_ping], 20
     lea rdi, [empty_payload]
     xor esi, esi
     mov edx, 9                             ; Ping
     call websocket_send_frame
     test eax, eax
     js .send_failed
+    add qword [ws_ping_due_ms], 20000
     jmp .loop
 .poll_failed:
     lea rdi, [log_ws_poll_failed]
@@ -1983,6 +2014,7 @@ websocket_loop:
     call log_static
 .done:
     mov dword [bridge_active], 0
+    pop r12
     ret
 
 ; EAX=0 on success; negative on close/protocol/read error.
@@ -2901,6 +2933,8 @@ fabric_json_length:     dq 0
 ws_payload_length:      dd 0
 ws_idle_seconds:        dd 0
 ws_next_ping:           dd 20
+ws_last_seen_ms:         dq 0
+ws_ping_due_ms:          dq 0
 poll_descriptor:        dq 0
 listener_pollfds:       dq 0, 0
 gateway_pipe_poll:       dq 0
@@ -2928,7 +2962,9 @@ sha_digest:             resb 20
 ws_response:            resb 256
 ws_frame_header:        resb 2
 ws_extended_length:     resb 2
-ws_mask:                resb 4
+ws_mask:               resb 4
+ws_clock:              resb 16
+
 ws_payload:             resb 4096
 ws_out_header:          resb 2
 gateway_message_buffer:  resb 65536
