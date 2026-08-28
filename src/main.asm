@@ -1040,8 +1040,11 @@ send_discord_json_buffer:
     lea rdi, [discord_authorization + discord_authorization_prefix_len]
     mov rsi, [discord_token_ptr]
     mov edx, [discord_token_len]
+    mov r13d, edx
     call memory_copy
-    mov byte [discord_authorization + discord_authorization_prefix_len + rdx], 0
+    lea rdi, [discord_authorization + discord_authorization_prefix_len]
+    add rdi, r13
+    mov byte [rdi], 0
 
     lea rdi, [discord_url]
     lea rsi, [discord_url_prefix]
@@ -1050,12 +1053,17 @@ send_discord_json_buffer:
     lea rdi, [discord_url + discord_url_prefix_len]
     mov rsi, [discord_channel_ptr]
     mov edx, [discord_channel_len]
+    mov r13d, edx
     call memory_copy
-    lea rdi, [discord_url + discord_url_prefix_len + rdx]
+    lea rdi, [discord_url + discord_url_prefix_len]
+    add rdi, r13
     lea rsi, [discord_url_suffix]
     mov edx, discord_url_suffix_len
     call memory_copy
-    mov byte [rdi + rdx], 0
+    lea rdi, [discord_url + discord_url_prefix_len]
+    add rdi, r13
+    add rdi, discord_url_suffix_len
+    mov byte [rdi], 0
 
     xor r14d, r14d
 .rest_retry:
