@@ -15,9 +15,13 @@
 
 static CURL *gateway;
 static char last_error[CURL_ERROR_SIZE];
+static char last_response[1024];
+static size_t last_response_len;
 
 static void clear_error(void) {
     memset(last_error, 0, sizeof(last_error));
+    memset(last_response, 0, sizeof(last_response));
+    last_response_len = 0;
 }
 
 static int configure_secure_handle(CURL *handle) {
@@ -48,6 +52,10 @@ int secure_transport_init(void) {
 
 const char *secure_transport_last_error(void) {
     return last_error[0] ? last_error : curl_easy_strerror(CURLE_OK);
+}
+
+const char *secure_transport_last_response(void) {
+    return last_response;
 }
 
 int secure_gateway_socket(void) {
@@ -163,10 +171,17 @@ long secure_gateway_recv_text(char *out, size_t cap, size_t *out_len) {
     return result;
 }
 
-static size_t discard_response(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    (void)ptr;
+static size_t capture_response(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t incoming = size * nmemb;
+    size_t available = sizeof(last_response) - 1 - last_response_len;
+    size_t copied = incoming < available ? incoming : available;
     (void)userdata;
-    return size * nmemb;
+    if (copied) {
+        memcpy(last_response + last_response_len, ptr, copied);
+        last_response_len += copied;
+        last_response[last_response_len] = 0;
+    }
+    return incoming;
 }
 
 struct response_buffer {
@@ -280,7 +295,7 @@ long secure_https_post_json(const char *url,
     if (code == CURLE_OK)
         code = curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)json_len);
     if (code == CURLE_OK)
-        code = curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, discard_response);
+        code = curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, capture_response);
     if (code == CURLE_OK)
         code = curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, 15000L);
     if (code == CURLE_OK)

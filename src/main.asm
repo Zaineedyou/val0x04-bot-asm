@@ -6,6 +6,8 @@ BITS 64
 DEFAULT REL
 
 extern secure_https_post_json
+extern secure_transport_last_error
+extern secure_transport_last_response
 extern secure_gateway_connect
 extern secure_gateway_close
 extern secure_gateway_socket
@@ -961,6 +963,7 @@ send_discord_json_buffer:
     xor eax, eax
     jmp .out
 .bad:
+    call log_discord_failure
     mov eax, -1
 .out:
     pop r15
@@ -968,6 +971,68 @@ send_discord_json_buffer:
     pop r13
     pop r12
     pop rbx
+    ret
+
+; Log only the bounded Discord response or transport error; never log tokens.
+log_discord_failure:
+    push r12
+    push r13
+    push r14
+    push r15
+    lea rdi, [discord_log_buffer]
+    lea rsi, [discord_log_prefix]
+    mov edx, discord_log_prefix_len
+    call memory_copy
+    mov r13d, discord_log_prefix_len
+    call secure_transport_last_response
+    mov r12, rax
+    test r12, r12
+    jz .use_error
+    mov rdi, r12
+    call cstring_length
+    test eax, eax
+    jz .use_error
+    mov r14d, eax
+    cmp r14d, 900
+    jbe .copy_response
+    mov r14d, 900
+.copy_response:
+    lea rdi, [discord_log_buffer + r13]
+    mov rsi, r12
+    mov edx, r14d
+    call memory_copy
+    add r13d, r14d
+    jmp .finish
+.use_error:
+    call secure_transport_last_error
+    mov r12, rax
+    test r12, r12
+    jz .finish
+    mov rdi, r12
+    call cstring_length
+    test eax, eax
+    jz .finish
+    mov r14d, eax
+    cmp r14d, 900
+    jbe .copy_error
+    mov r14d, 900
+.copy_error:
+    lea rdi, [discord_log_buffer + r13]
+    mov rsi, r12
+    mov edx, r14d
+    call memory_copy
+    add r13d, r14d
+.finish:
+    mov byte [discord_log_buffer + r13], 10
+    inc r13d
+    mov edi, 2
+    lea rsi, [discord_log_buffer]
+    mov edx, r13d
+    call write_all
+    pop r15
+    pop r14
+    pop r13
+    pop r12
     ret
 
 rest_sleep:
@@ -2367,6 +2432,8 @@ discord_json_prefix:    db '{"content":"'
 discord_json_prefix_len equ $ - discord_json_prefix
 discord_json_suffix:    db '"}'
 discord_json_suffix_len equ $ - discord_json_suffix
+discord_log_prefix:     db 'val0x04-asm: Discord POST failed: '
+discord_log_prefix_len equ $ - discord_log_prefix
 
 response_health:
     db 'HTTP/1.1 200 OK',13,10
@@ -2506,6 +2573,7 @@ gateway_message_buffer:  resb 65536
 rest_sleep_timespec:     resb 16
 discord_url:            resb 256
 discord_authorization:  resb 512
+discord_log_buffer:     resb 1200
 discord_json:           resb 4096
 panel_message:          resb 4096
 panel_message_length:    resq 1
