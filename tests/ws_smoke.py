@@ -2,6 +2,7 @@
 """Black-box smoke test for the syscall-only WebSocket listener."""
 import os
 import socket
+import time
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "18080"))
@@ -78,7 +79,11 @@ def main() -> None:
     ).encode()
     with socket.create_connection((HOST, PORT), timeout=3) as sock:
         sock.settimeout(3)
-        sock.sendall(request)
+        split = request.find(b"Sec-WebSocket-Key")
+        assert split > 0
+        sock.sendall(request[:split])
+        time.sleep(0.05)
+        sock.sendall(request[split:])
         response = recv_until(sock, b"\r\n\r\n")
         response_text = response.decode("ascii")
         assert response_text.startswith("HTTP/1.1 101"), response_text

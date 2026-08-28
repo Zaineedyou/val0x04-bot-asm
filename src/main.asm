@@ -552,19 +552,35 @@ open_listener:
 ; ---------------------------------------------------------------------------
 handle_http_request:
     mov [client_fd], edi
+    xor r12d, r12d
+.read_more:
     mov eax, SYS_READ
     mov edi, dword [client_fd]
-    lea rsi, [request_buffer]
+    lea rsi, [request_buffer + r12]
     mov edx, REQUEST_CAPACITY - 1
+    sub edx, r12d
     syscall
     test rax, rax
-    jg .request_ready
+    js .read_failed
+    jz .read_failed
+    add r12, rax
+    mov [request_length], r12
+    lea rdi, [request_buffer]
+    lea rsi, [header_terminator]
+    mov ecx, header_terminator_len
+    mov rdx, r12
+    call find_bytes
+    test rax, rax
+    jnz .request_ready
+    cmp r12, REQUEST_CAPACITY - 1
+    jb .read_more
+.read_failed:
     lea rdi, [log_http_read_failed]
     mov esi, log_http_read_failed_len
     call log_static
     jmp .done
 .request_ready:
-    mov [request_length], rax
+    mov rax, [request_length]
     mov byte [request_buffer + rax], 0
 
     lea rdi, [request_buffer]
