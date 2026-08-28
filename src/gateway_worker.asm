@@ -20,6 +20,7 @@ extern gateway_pipe_write
 extern write_all
 extern log_static
 extern log_transport_failure
+extern log_gateway_transport_failure
 extern log_http_status
 
 global gateway_worker
@@ -38,6 +39,8 @@ global gateway_copy
 %define SYS_NANOSLEEP       35
 %define CLOCK_MONOTONIC     1
 %define POLLIN              1
+%define POLLOUT             4
+%define EAGAIN              11
 %define CURLWS_TEXT         1
 %define CURLWS_PING         16
 %define CURLWS_CLOSE        8
@@ -60,7 +63,7 @@ gateway_connect_loop:
     call secure_gateway_connect
     test eax, eax
     jns .connected
-    call log_transport_failure
+    call log_gateway_transport_failure
     jmp .retry
 .connected:
     lea rdi, [log_gateway_connected]
@@ -155,13 +158,13 @@ gateway_identify:
     mov esi, eax
     lea rdi, [gateway_identify_buffer]
     mov edx, CURLWS_TEXT
-    call secure_gateway_send
+    call gateway_send_wait_writable
     test rax, rax
     js .bad
     xor eax, eax
     ret
 .bad:
-    call log_transport_failure
+    call log_gateway_transport_failure
     lea rdi, [log_gateway_identify_failed]
     mov esi, log_gateway_identify_failed_len
     call log_static
@@ -184,13 +187,13 @@ gateway_resume:
     mov esi, eax
     lea rdi, [gateway_resume_buffer]
     mov edx, CURLWS_TEXT
-    call secure_gateway_send
+    call gateway_send_wait_writable
     test rax, rax
     js .bad
     xor eax, eax
     ret
 .bad:
-    call log_transport_failure
+    call log_gateway_transport_failure
     lea rdi, [log_gateway_resume_failed]
     mov esi, log_gateway_resume_failed_len
     call log_static
@@ -380,7 +383,7 @@ gateway_send_heartbeat:
     mov esi, eax
     lea rdi, [gateway_heartbeat_buffer]
     mov edx, CURLWS_TEXT
-    call secure_gateway_send
+    call gateway_send_wait_writable
     test rax, rax
     js .bad
     mov dword [heartbeat_waiting], 1
@@ -390,7 +393,7 @@ gateway_send_heartbeat:
     xor eax, eax
     ret
 .bad:
-    call log_transport_failure
+    call log_gateway_transport_failure
     lea rdi, [log_gateway_heartbeat_failed]
     mov esi, log_gateway_heartbeat_failed_len
     call log_static
@@ -439,13 +442,103 @@ gateway_set_first_heartbeat:
 
 ; Receive one complete frame. Fragmented Gateway application frames are
 ; rejected rather than silently truncating a JSON packet.
+; Send through libcurl, waiting for socket writability when it reports EAGAIN.
+; RDI=payload, ESI=length, EDX=WebSocket flags. EAX=bytes or -1.
+gateway_send_wait_writable:
+    push r12
+    push r13
+    push r14
+    mov r12, rdi
+    mov r13d, esi
+    mov r14d, edx
+.retry:
+    mov rdi, r12
+    mov esi, r13d
+    mov edx, r14d
+    call secure_gateway_send
+    test rax, rax
+    jns .out
+    cmp eax, -EAGAIN
+    jne .bad
+    call secure_gateway_socket
+    test eax, eax
+    js .bad
+    mov [gateway_poll_fd], eax
+    mov word [gateway_poll_entry + 4], POLLOUT
+    mov word [gateway_poll_entry + 6], 0
+    mov eax, SYS_POLL
+    lea rdi, [gateway_poll_entry]
+    mov esi, 1
+    mov edx, 1000
+    syscall
+    test rax, rax
+    jle .bad
+    test word [gateway_poll_entry + 6], POLLOUT
+    jz .bad
+    jmp .retry
+.bad:
+    mov eax, -1
+.out:
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+gateway_recv_wait_readable:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov r13d, esi
+    mov r14, rdx
+    mov r15, rcx
+    mov rbx, r8
+.retry:
+    mov rdi, r12
+    mov esi, r13d
+    mov rdx, r14
+    mov rcx, r15
+    mov r8, rbx
+    call secure_gateway_recv
+    test rax, rax
+    jns .out
+    cmp eax, -EAGAIN
+    jne .bad
+    call secure_gateway_socket
+    test eax, eax
+    js .bad
+    mov [gateway_poll_fd], eax
+    mov word [gateway_poll_entry + 4], POLLIN
+    mov word [gateway_poll_entry + 6], 0
+    mov eax, SYS_POLL
+    lea rdi, [gateway_poll_entry]
+    mov esi, 1
+    mov edx, 1000
+    syscall
+    test rax, rax
+    jle .bad
+    test word [gateway_poll_entry + 6], POLLIN
+    jz .bad
+    jmp .retry
+.bad:
+    mov eax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 gateway_receive_packet:
     mov rdi, [gateway_packet]
     mov esi, 16383
     lea rdx, [gateway_packet_len]
     lea rcx, [gateway_frame_flags]
     lea r8, [gateway_bytes_left]
-    call secure_gateway_recv
+    call gateway_recv_wait_readable
     test rax, rax
     js .bad
     cmp qword [gateway_bytes_left], 0
@@ -458,7 +551,7 @@ gateway_receive_packet:
     mov rdi, [gateway_packet]
     mov rsi, [gateway_packet_len]
     mov edx, CURLWS_PONG
-    call secure_gateway_send
+    call gateway_send_wait_writable
     test rax, rax
     js .bad
     mov qword [gateway_packet_len], 0
@@ -471,7 +564,7 @@ gateway_receive_packet:
     xor eax, eax
     ret
 .bad:
-    call log_transport_failure
+    call log_gateway_transport_failure
     lea rdi, [log_gateway_frame_failed]
     mov esi, log_gateway_frame_failed_len
     call log_static
@@ -502,7 +595,7 @@ gateway_poll_readable:
     xor eax, eax
     ret
 .bad:
-    call log_transport_failure
+    call log_gateway_transport_failure
     lea rdi, [log_gateway_poll_failed]
     mov esi, log_gateway_poll_failed_len
     call log_static

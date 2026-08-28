@@ -29,6 +29,7 @@ global gateway_pipe_write
 global write_all
 global log_static
 global log_transport_failure
+global log_gateway_transport_failure
 global log_http_status
 
 %define SYS_READ            0
@@ -1095,6 +1096,50 @@ log_http_status:
     lea rsi, [discord_log_buffer]
     mov edx, r13d
     call write_all
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+; Log a Gateway transport failure without inventing an HTTP status.
+; Gateway WSS has no REST HTTP status available at this layer.
+log_gateway_transport_failure:
+    push r12
+    push r13
+    push r14
+    lea rdi, [log_gateway_transport_prefix]
+    mov esi, log_gateway_transport_prefix_len
+    call log_static
+    call secure_transport_last_error
+    mov r12, rax
+    test r12, r12
+    jz .done
+    mov rdi, r12
+    call cstring_length
+    test eax, eax
+    jz .done
+    mov r14d, eax
+    cmp r14d, 900
+    jbe .copy_error
+    mov r14d, 900
+.copy_error:
+    lea rdi, [discord_log_buffer]
+    lea rsi, [transport_detail_prefix]
+    mov edx, transport_detail_prefix_len
+    call memory_copy
+    mov r13d, transport_detail_prefix_len
+    lea rdi, [discord_log_buffer + r13]
+    mov rsi, r12
+    mov edx, r14d
+    call memory_copy
+    add r13d, r14d
+    mov byte [discord_log_buffer + r13], 10
+    inc r13d
+    mov edi, 2
+    lea rsi, [discord_log_buffer]
+    mov edx, r13d
+    call write_all
+.done:
     pop r14
     pop r13
     pop r12
@@ -2660,6 +2705,8 @@ discord_json_suffix:    db '"}'
 discord_json_suffix_len equ $ - discord_json_suffix
 transport_status_prefix: db 'val0x04-asm: transport Discord gagal, HTTP status='
 transport_status_prefix_len equ $ - transport_status_prefix
+log_gateway_transport_prefix: db 'val0x04-asm: transport Gateway gagal',10
+log_gateway_transport_prefix_len equ $ - log_gateway_transport_prefix
 transport_detail_prefix: db 'val0x04-asm: detail transport: '
 transport_detail_prefix_len equ $ - transport_detail_prefix
 
