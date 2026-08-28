@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <poll.h>
 
 /*
  * This is deliberately a transport-only boundary. It does not parse Discord
@@ -115,7 +116,21 @@ long secure_gateway_send(const char *data, size_t len, unsigned int flags) {
         const char *source = data ? data + offset : "";
         CURLcode code = curl_ws_send(gateway, source, len - offset,
                                      &sent, 0, flags);
-        if (code == CURLE_AGAIN) return -EAGAIN;
+        if (code == CURLE_AGAIN) {
+            curl_socket_t socket_fd = CURL_SOCKET_BAD;
+            struct pollfd descriptor;
+            int waited;
+            if (curl_easy_getinfo(gateway, CURLINFO_ACTIVESOCKET, &socket_fd) != CURLE_OK ||
+                socket_fd == CURL_SOCKET_BAD) {
+                return -EAGAIN;
+            }
+            descriptor.fd = (int)socket_fd;
+            descriptor.events = POLLOUT;
+            descriptor.revents = 0;
+            waited = poll(&descriptor, 1, 1000);
+            if (waited <= 0 || !(descriptor.revents & POLLOUT)) return -EAGAIN;
+            continue;
+        }
         if (code != CURLE_OK) {
             if (!last_error[0])
                 strncpy(last_error, curl_easy_strerror(code), sizeof(last_error) - 1);
