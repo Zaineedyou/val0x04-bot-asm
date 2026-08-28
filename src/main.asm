@@ -423,10 +423,24 @@ parse_decimal_u64:
     xor edx, edx
     xor ecx, ecx
     mov r9, 10
+.skip_leading_u64:
+    movzx r8d, byte [rdi + rcx]
+    cmp r8b, ' '
+    je .leading_next_u64
+    cmp r8b, 9
+    je .leading_next_u64
+    jmp .loop_u64
+.leading_next_u64:
+    inc rcx
+    jmp .skip_leading_u64
 .loop_u64:
     movzx r8d, byte [rdi + rcx]
     test r8b, r8b
     jz .valid_u64
+    cmp r8b, ' '
+    je .skip_trailing_u64
+    cmp r8b, 9
+    je .skip_trailing_u64
     sub r8b, '0'
     cmp r8b, 9
     ja .invalid_u64
@@ -437,6 +451,18 @@ parse_decimal_u64:
     jc .invalid_u64
     inc rcx
     jmp .loop_u64
+.skip_trailing_u64:
+    inc rcx
+    movzx r8d, byte [rdi + rcx]
+    test r8b, r8b
+    jz .valid_u64
+    cmp r8b, ' '
+    je .skip_trailing_u64
+    cmp r8b, 9
+    je .skip_trailing_u64
+    mov edx, 1
+    xor eax, eax
+    ret
 .valid_u64:
     xor edx, edx
     ret
