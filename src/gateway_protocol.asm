@@ -354,7 +354,7 @@ op_key: db '"op":'
 op_key_len equ $ - op_key
 sequence_key: db '"s":'
 sequence_key_len equ $ - sequence_key
-identify_prefix: db '{"op":2,"d":{"compress":true,"token":"'
+identify_prefix: db '{"op":2,"d":{"compress":false,"token":"'
 identify_prefix_len equ $ - identify_prefix
 identify_suffix: db '","large_threshold":250,"shard":[0,1],"intents":33283,"properties":{"browser":"serenity","device":"serenity","os":"linux"},"presence":{"afk":false,"status":"online","since":null,"activities":[]}}}'
 identify_suffix_len equ $ - identify_suffix

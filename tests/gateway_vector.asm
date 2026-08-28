@@ -126,7 +126,7 @@ null_sequence: db '{"op":10,"s":null}'
 null_sequence_len equ $ - null_sequence
 token: db 'abc.def'
 token_len equ $ - token
-identify_expected_head: db '{"op":2,"d":{"compress":true,"token":"abc.def'
+identify_expected_head: db '{"op":2,"d":{"compress":false,"token":"abc.def'
 identify_expected_head_len equ $ - identify_expected_head
 identify_expected_middle: db '","large_threshold":250,"shard":[0,1],"intents":33283,"properties":{"browser":"serenity","device":"serenity","os":"linux"},"presence":{"afk":false,"status":"online","since":null,"activities":[]}}}'
 identify_expected_middle_len equ $ - identify_expected_middle
