@@ -63,19 +63,10 @@ gateway_build_identify:
     mov r13, rsi                    ; capacity
     mov r15, rdx                    ; token pointer
     mov rbx, rcx                    ; token length
-    ; Serenity 0.12.5 sends SystemTime::now() in presence.since.
-    mov eax, 228                    ; SYS_CLOCK_GETTIME
-    xor edi, edi                    ; CLOCK_REALTIME
-    lea rsi, [identify_timespec]
-    syscall
-    test rax, rax
-    js .bad
-    mov r10, [identify_timespec]
-    mov r11, [identify_timespec + 8]
-    ; Reserve room for both decimal SystemTime fields before writing.
+    ; Discord requires presence.since to be an integer timestamp or null.
+    ; This client does not publish a timestamp, so the payload uses null.
     mov rax, rbx
     add rax, identify_prefix_len + identify_suffix_len
-    add rax, 40
     cmp r13, rax
     jb .bad
     mov rdi, r12
@@ -93,19 +84,6 @@ gateway_build_identify:
     mov edx, identify_suffix_len
     call gateway_copy
     add r14, identify_suffix_len
-    lea rdi, [r12 + r14]
-    mov rax, r10
-    call gateway_write_u64
-    add r14, rax
-    lea rdi, [r12 + r14]
-    lea rsi, [identify_since_middle]
-    mov edx, identify_since_middle_len
-    call gateway_copy
-    add r14, identify_since_middle_len
-    lea rdi, [r12 + r14]
-    mov rax, r11
-    call gateway_write_u64
-    add r14, rax
     lea rdi, [r12 + r14]
     lea rsi, [identify_suffix_end]
     mov edx, identify_suffix_end_len
@@ -378,11 +356,11 @@ sequence_key: db '"s":'
 sequence_key_len equ $ - sequence_key
 identify_prefix: db '{"op":2,"d":{"compress":true,"token":"'
 identify_prefix_len equ $ - identify_prefix
-identify_suffix: db '","large_threshold":250,"shard":[0,1],"intents":33283,"properties":{"browser":"serenity","device":"serenity","os":"linux"},"presence":{"afk":false,"status":"online","since":{"secs_since_epoch":'
+identify_suffix: db '","large_threshold":250,"shard":[0,1],"intents":33283,"properties":{"browser":"serenity","device":"serenity","os":"linux"},"presence":{"afk":false,"status":"online","since":null,"activities":[]}}}'
 identify_suffix_len equ $ - identify_suffix
-identify_since_middle: db ',"nanos_since_epoch":'
+identify_since_middle: db ''
 identify_since_middle_len equ $ - identify_since_middle
-identify_suffix_end: db '},"activities":[]}}}'
+identify_suffix_end: db ''
 identify_suffix_end_len equ $ - identify_suffix_end
 heartbeat_prefix: db '{"op":1,"d":'
 heartbeat_prefix_len equ $ - heartbeat_prefix

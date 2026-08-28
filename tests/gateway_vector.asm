@@ -128,11 +128,11 @@ token: db 'abc.def'
 token_len equ $ - token
 identify_expected_head: db '{"op":2,"d":{"compress":true,"token":"abc.def'
 identify_expected_head_len equ $ - identify_expected_head
-identify_expected_middle: db '","large_threshold":250,"shard":[0,1],"intents":33283,"properties":{"browser":"serenity","device":"serenity","os":"linux"},"presence":{"afk":false,"status":"online","since":{"secs_since_epoch":'
+identify_expected_middle: db '","large_threshold":250,"shard":[0,1],"intents":33283,"properties":{"browser":"serenity","device":"serenity","os":"linux"},"presence":{"afk":false,"status":"online","since":null,"activities":[]}}}'
 identify_expected_middle_len equ $ - identify_expected_middle
-identify_expected_tail: db '},"activities":[]}}}'
+identify_expected_tail: db ''
 identify_expected_tail_len equ $ - identify_expected_tail
-identify_min_len equ identify_expected_head_len + identify_expected_middle_len + identify_expected_tail_len + 2
+identify_min_len equ identify_expected_head_len + identify_expected_middle_len + identify_expected_tail_len
 heartbeat_expected: db '{"op":1,"d":42}'
 heartbeat_expected_len equ $ - heartbeat_expected
 session: db 'session-1'
